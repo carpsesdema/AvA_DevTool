@@ -17,6 +17,7 @@ class EventBus(QObject):
 
     showLlmLogWindowRequested = Signal()
     chatLlmPersonalityEditRequested = Signal()
+    viewCodeViewerRequested = Signal()  # ADDED: Missing signal for DialogService
 
     backendConfigurationChanged = Signal(str, str, bool, list)
     llmRequestSent = Signal(str, str)
@@ -34,6 +35,12 @@ class EventBus(QObject):
     uiTextCopied = Signal(str, str)
     uiInputBarBusyStateChanged = Signal(bool)
     backendBusyStateChanged = Signal(bool)
+
+    # NEW: Signal for when generated code files are ready to display
+    modificationFileReadyForDisplay = Signal(str, str)  # filename, content
+
+    # NEW: Signal for when code viewer requests to apply changes
+    applyFileChangeRequested = Signal(str, str, str, str)  # project_id, relative_path, content, focus_prefix
 
     @staticmethod
     def get_instance() -> 'EventBus':

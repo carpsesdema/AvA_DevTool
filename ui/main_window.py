@@ -201,6 +201,7 @@ class MainWindow(QWidget):
         bus.uiInputBarBusyStateChanged.connect(self._handle_input_bar_busy_state_change_phase1)
         bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
 
+        # FIXED: Connect to the code file display signal
         bus.modificationFileReadyForDisplay.connect(self._handle_code_file_update_event)
 
         bus.newMessageAddedToHistory.connect(self.p1_chat_display_area.add_message_to_model)
@@ -226,21 +227,16 @@ class MainWindow(QWidget):
                 project_id = "p1_chat_context"
                 focus_prefix = self.app_base_path
 
-                if hasattr(self.chat_manager, 'get_current_project_id'):
-                    current_pid = self.chat_manager.get_current_project_id()
-                    if current_pid: project_id = current_pid
-
-                if hasattr(self.chat_manager, 'get_current_focus_prefix'):  # Assuming such a method might exist later
-                    current_focus = self.chat_manager.get_current_focus_prefix()
-                    if current_focus: focus_prefix = current_focus
-
+                # For Phase 1, use simple defaults
                 code_viewer.update_or_add_file(
                     filename,
                     content,
-                    is_ai_modification=True,
+                    is_ai_modification=True,  # Since this comes from PlanAndCodeCoordinator
+                    original_content=None,    # No original content tracking in Phase 1
                     project_id_for_apply=project_id,
                     focus_prefix_for_apply=focus_prefix
                 )
+                logger.info(f"MainWindow: Successfully added '{filename}' to CodeViewer")
             else:
                 logger.error("MainWindow: CodeViewerDialog instance could not be obtained/created.")
         else:
