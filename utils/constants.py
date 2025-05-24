@@ -9,15 +9,15 @@ APP_NAME = "AvA: PySide6 Rebuild"
 APP_VERSION = "0.1.0-Phase1"
 
 # --- Backend Configuration ---
-DEFAULT_CHAT_BACKEND_ID = "ollama_chat_default" # CORRECTED: Changed default to Ollama
-DEFAULT_GEMINI_CHAT_MODEL = "gemini-1.5-flash-latest" # Keep for Gemini still
-DEFAULT_OLLAMA_CHAT_MODEL = "llama2:13b" # ADDED: New default for Ollama
+DEFAULT_CHAT_BACKEND_ID = "ollama_chat_default"
+DEFAULT_GEMINI_CHAT_MODEL = "gemini-1.5-flash-latest"
+DEFAULT_OLLAMA_CHAT_MODEL = "llama3:latest"  # FIXED: Use the model you actually have!
 
-# --- UI Aesthetics ---
+# Rest of the file stays the same...
 CHAT_FONT_FAMILY = "Segoe UI"
 CHAT_FONT_SIZE = 10
 LOADING_GIF_FILENAME = "loading.gif"
-APP_ICON_FILENAME = "Synchat.ico" # Or "ava_logo.svg" if you add it
+APP_ICON_FILENAME = "Synchat.ico"
 
 USER_BUBBLE_COLOR_HEX = "#0B71E6"
 USER_TEXT_COLOR_HEX = "#FFFFFF"
@@ -31,7 +31,6 @@ BUBBLE_BORDER_COLOR_HEX = "#2D2D2D"
 TIMESTAMP_COLOR_HEX = "#888888"
 CODE_BLOCK_BG_COLOR_HEX = "#1E1E1E"
 
-# --- Paths ---
 if getattr(sys, 'frozen', False):
     APP_BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -54,7 +53,6 @@ STYLE_PATHS_TO_CHECK = [
 ]
 BUBBLE_STYLESHEET_PATH = os.path.join(UI_DIR_PATH, BUBBLE_STYLESHEET_FILENAME)
 
-# --- Logging ---
 LOG_LEVEL = "DEBUG"
 LOG_FILE_NAME = "ava_pys6_phase1.log"
 LOG_FORMAT = '%(asctime)s.%(msecs)03d - %(levelname)-8s - [%(name)s:%(module)s.%(funcName)s:%(lineno)d] - %(message)s'

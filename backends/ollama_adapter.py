@@ -38,38 +38,11 @@ except ImportError:
     MODEL_ROLE, USER_ROLE, SYSTEM_ROLE, ERROR_ROLE = "model", "user", "system", "error"
 
 logger = logging.getLogger(__name__)
-_SENTINEL_OLLAMA = object()
-
-
-def _blocking_ollama_stream_call(client: ollama.Client, model_name: str, messages: List[Dict[str, Any]],
-                                 options: Optional[Dict[str, Any]]) -> Any:
-    try:
-        stream_iterator = client.chat(
-            model=model_name,
-            messages=messages,
-            stream=True,
-            options=options
-        )
-        return stream_iterator
-    except ollama.ResponseError as e_resp:  # type: ignore
-        raise RuntimeError(
-            f"Ollama API Response Error ({model_name}): {e_resp.status_code} - {e_resp.error}") from e_resp  # type: ignore
-    except Exception as e_call:
-        raise RuntimeError(f"Ollama client.chat Error ({model_name}): {type(e_call).__name__} - {e_call}") from e_call
-
-
-def _blocking_next_or_sentinel_ollama(iterator: Any) -> Any:
-    try:
-        return next(iterator)
-    except StopIteration:
-        return _SENTINEL_OLLAMA
-    except Exception as e_next:
-        raise RuntimeError(f"Error in Ollama stream iterator: {type(e_next).__name__} - {e_next}") from e_next
 
 
 class OllamaAdapter(BackendInterface):
     DEFAULT_OLLAMA_HOST = "http://localhost:11434"
-    DEFAULT_MODEL = "llama3:latest"
+    DEFAULT_MODEL = "llama3.2:3b"
 
     def __init__(self):
         super().__init__()
@@ -128,7 +101,7 @@ class OllamaAdapter(BackendInterface):
         return self._last_error
 
     async def get_response_stream(self, history: List[ChatMessage], options: Optional[Dict[str, Any]] = None) -> \
-    AsyncGenerator[str, None]:  # type: ignore
+            AsyncGenerator[str, None]:  # type: ignore
         self._last_error = None
         self._last_prompt_tokens = None
         self._last_completion_tokens = None
@@ -147,39 +120,52 @@ class OllamaAdapter(BackendInterface):
             if "temperature" in options and isinstance(options["temperature"], (float, int)):
                 ollama_api_options["temperature"] = float(options["temperature"])
 
-        sync_stream_iterator = None
         try:
-            sync_stream_iterator = await asyncio.to_thread(
-                _blocking_ollama_stream_call, self._sync_client, self._model_name, messages_for_api, ollama_api_options
-            )
-            while True:
-                chunk = await asyncio.to_thread(_blocking_next_or_sentinel_ollama, sync_stream_iterator)
-                if chunk is _SENTINEL_OLLAMA: break
-                if not isinstance(chunk, dict): continue
+            def _blocking_ollama_stream_call():
+                return self._sync_client.chat(  # type: ignore
+                    model=self._model_name,
+                    messages=messages_for_api,
+                    stream=True,
+                    options=ollama_api_options
+                )
 
-                if chunk.get("error"):
-                    self._last_error = chunk["error"]
-                    yield f"[SYSTEM ERROR: {self._last_error}]"
+            # FIXED: Get the stream iterator properly
+            stream_iterator = await asyncio.to_thread(_blocking_ollama_stream_call)
+
+            # FIXED: Process the stream correctly
+            def _process_ollama_stream():
+                for chunk in stream_iterator:
+                    if not isinstance(chunk, dict):
+                        continue
+
+                    if chunk.get("error"):
+                        error_msg = chunk["error"]
+                        self._last_error = error_msg
+                        yield f"[SYSTEM ERROR: {error_msg}]"
+                        if chunk.get('done', False):
+                            self._last_prompt_tokens = chunk.get('prompt_eval_count')
+                            self._last_completion_tokens = chunk.get('eval_count')
+                        return
+
+                    content_part = chunk.get('message', {}).get('content', '')
+                    if content_part:
+                        yield content_part
+
                     if chunk.get('done', False):
                         self._last_prompt_tokens = chunk.get('prompt_eval_count')
                         self._last_completion_tokens = chunk.get('eval_count')
-                    return
+                        break
 
-                content_part = chunk.get('message', {}).get('content', '')
-                if content_part: yield content_part
+            # Process the stream in a thread and yield chunks
+            for chunk_text in await asyncio.to_thread(lambda: list(_process_ollama_stream())):
+                yield chunk_text
 
-                if chunk.get('done', False):
-                    self._last_prompt_tokens = chunk.get('prompt_eval_count')
-                    self._last_completion_tokens = chunk.get('eval_count')
-                    break
         except ollama.ResponseError as e_resp:  # type: ignore
             self._last_error = f"Ollama API Response Error: {e_resp.status_code} - {e_resp.error}"  # type: ignore
             raise RuntimeError(self._last_error) from e_resp
-        except RuntimeError as e_rt:
-            if not self._last_error: self._last_error = f"Runtime error during Ollama stream: {e_rt}"
-            raise
         except Exception as e_general:
-            if not self._last_error: self._last_error = f"Unexpected error in Ollama stream: {type(e_general).__name__} - {e_general}"
+            if not self._last_error:
+                self._last_error = f"Unexpected error in Ollama stream: {type(e_general).__name__} - {e_general}"
             raise RuntimeError(self._last_error) from e_general
 
     def get_available_models(self) -> List[str]:
@@ -206,7 +192,7 @@ class OllamaAdapter(BackendInterface):
                     items_to_parse = models_response_data.models  # type: ignore
             elif _ollama_module_present and hasattr(models_response_data,
                                                     '__module__') and models_response_data.__module__.startswith(
-                    'ollama._types') and type(models_response_data).__name__ == 'ListResponse':  # type: ignore
+                'ollama._types') and type(models_response_data).__name__ == 'ListResponse':  # type: ignore
                 if hasattr(models_response_data, 'models') and isinstance(models_response_data.models,
                                                                           list):  # type: ignore
                     items_to_parse = models_response_data.models  # type: ignore
@@ -285,4 +271,3 @@ class OllamaAdapter(BackendInterface):
         if self._last_prompt_tokens is not None and self._last_completion_tokens is not None:
             return (self._last_prompt_tokens, self._last_completion_tokens)
         return None
-
