@@ -1,0 +1,9 @@
+PySide6
+qasync
+google-generativeai
+python-dotenv
+Pygments
+Markdown
+openai
+ollama
+qtawesome
