@@ -6,12 +6,18 @@ import sys
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-# --- Ensure the project root is in sys.path for absolute imports ---
-# This helps resolve imports like 'from services.X import Y'
+# --- CRITICAL PATH SETUP FOR IMPORTS ---
+# This block ensures the project root is always in sys.path for absolute imports
+# like 'from services.X import Y' or 'from core.Y import Z'.
+# This helps resolve module not found errors when running main.py directly.
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-# --- End project root sys.path setup ---
+
+# --- DEBUGGING STEP: Print sys.path to confirm ---
+print(f"DEBUG: sys.path before core imports: {sys.path}")
+# --- END DEBUGGING STEP ---
+# --- END CRITICAL PATH SETUP ---
 
 # --- PySide6 Imports (Explicitly added back for clarity and robustness) ---
 from PySide6.QtCore import Qt, QTimer
@@ -41,7 +47,7 @@ try:
     from services.project_service import ProjectManager
 except ImportError as e:
     _prelim_logger.critical(f"Failed to import core components in main.py: {e}", exc_info=True)
-    _prelim_logger.info(f"PYTHONPATH: {sys.path}")
+    _prelim_logger.info(f"PYTHONPATH: {sys.path}") # This will show sys.path *after* some imports failed
     if 'utils.constants' not in sys.modules:
         _prelim_logger.error(
             "Failed to import 'utils.constants'. This is often a PYTHONPATH issue or "
