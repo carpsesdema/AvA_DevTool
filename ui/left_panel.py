@@ -6,7 +6,8 @@ from PySide6.QtCore import Qt, QSize, Slot
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QSizePolicy,
-    QComboBox, QGroupBox
+    QComboBox, QGroupBox, QListWidget, QListWidgetItem, QHBoxLayout,
+    QInputDialog, QMessageBox
 )
 
 try:
@@ -22,8 +23,12 @@ try:
     from utils import constants
     from core.event_bus import EventBus
     from core.chat_manager import ChatManager
+    from services.project_service import Project, ChatSession  # For type hinting
 except ImportError as e_lp:
     logging.getLogger(__name__).critical(f"Critical import error in LeftPanel: {e_lp}", exc_info=True)
+    # Fallback types for when imports fail during development/CI
+    Project = type("Project", (object,), {})  # type: ignore
+    ChatSession = type("ChatSession", (object,), {})  # type: ignore
     raise
 
 logger = logging.getLogger(__name__)
@@ -31,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 class LeftControlPanel(QWidget):
     MODEL_CONFIG_DATA_ROLE = Qt.ItemDataRole.UserRole + 2
+    PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole + 3
+    SESSION_ID_ROLE = Qt.ItemDataRole.UserRole + 4
 
     SPECIALIZED_BACKEND_DETAILS = [
         {"id": constants.GENERATOR_BACKEND_ID, "name": "Generator (Ollama)"},
@@ -44,15 +51,21 @@ class LeftControlPanel(QWidget):
             raise TypeError("LeftControlPanel requires a valid ChatManager instance.")
 
         self.chat_manager = chat_manager
+        self._project_manager = chat_manager.get_project_manager()  # Get ProjectManager
         self._event_bus = EventBus.get_instance()
         self._is_programmatic_model_change: bool = False
+        self._is_programmatic_selection_change: bool = False
 
-        self._init_widgets_phase1()
-        self._init_layout_phase1()
-        self._connect_signals_phase1()
+        self._init_widgets_phase1()  # Existing widgets
+        self._init_project_session_widgets()  # New widgets
+        self._init_layout_phase1()  # Modified layout
+        self._connect_signals_phase1()  # Existing signals
+        self._connect_project_session_signals()  # New signals
 
         self._load_initial_model_settings_phase1()
-        logger.info("LeftControlPanel (Phase 1) initialized.")
+        self.load_initial_projects_and_sessions()  # New: load initial project/session lists
+
+        logger.info("LeftControlPanel initialized.")
 
     def _get_qta_icon(self, icon_name: str, color: str = "#00CFE8") -> QIcon:
         if QTAWESOME_AVAILABLE and qta:
@@ -64,13 +77,14 @@ class LeftControlPanel(QWidget):
 
     def _init_widgets_phase1(self):
         self.button_font = QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 1)
-        button_style_sheet = "QPushButton { text-align: left; padding: 6px 8px; }"
-        button_icon_size = QSize(16, 16)
+        self.button_style_sheet = "QPushButton { text-align: left; padding: 6px 8px; }"
+        self.button_icon_size = QSize(16, 16)
 
         self.llm_config_group = QGroupBox("LLM Configuration")
-        self.actions_group = QGroupBox("Actions")
+        self.actions_group = QGroupBox("Chat Actions")  # Renamed for clarity
+        self.projects_group = QGroupBox("Projects & Sessions")  # New Group
 
-        for group_box in [self.llm_config_group, self.actions_group]:
+        for group_box in [self.llm_config_group, self.actions_group, self.projects_group]:
             group_box.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 1, QFont.Weight.Bold))
 
         self.chat_llm_label = QLabel("Chat LLM:")
@@ -96,30 +110,66 @@ class LeftControlPanel(QWidget):
         self.configure_ai_personality_button.setIcon(self._get_qta_icon('fa5s.user-cog', color="#DAA520"))
         self.configure_ai_personality_button.setToolTip("Customize AI personality / system prompt (Ctrl+P)")
         self.configure_ai_personality_button.setObjectName("configureAiPersonalityButton")
-        self.configure_ai_personality_button.setStyleSheet(button_style_sheet)
-        self.configure_ai_personality_button.setIconSize(button_icon_size)
+        self.configure_ai_personality_button.setStyleSheet(self.button_style_sheet)
+        self.configure_ai_personality_button.setIconSize(self.button_icon_size)
 
-        self.new_chat_button = QPushButton(" New Chat")
+        self.new_chat_button = QPushButton(" New Session")  # Renamed
         self.new_chat_button.setFont(self.button_font)
         self.new_chat_button.setIcon(self._get_qta_icon('fa5s.comment-dots', color="#61AFEF"))
-        self.new_chat_button.setToolTip("Start a new chat session (Ctrl+N)")
+        self.new_chat_button.setToolTip("Start a new chat session in the current project (Ctrl+N)")  # Modified
         self.new_chat_button.setObjectName("newChatButton")
-        self.new_chat_button.setStyleSheet(button_style_sheet)
-        self.new_chat_button.setIconSize(button_icon_size)
+        self.new_chat_button.setStyleSheet(self.button_style_sheet)
+        self.new_chat_button.setIconSize(self.button_icon_size)
 
         self.view_llm_terminal_button = QPushButton(" View LLM Log")
         self.view_llm_terminal_button.setFont(self.button_font)
         self.view_llm_terminal_button.setIcon(self._get_qta_icon('fa5s.terminal', color="#98C379"))
         self.view_llm_terminal_button.setToolTip("Show LLM communication log (Ctrl+L)")
         self.view_llm_terminal_button.setObjectName("viewLlmTerminalButton")
-        self.view_llm_terminal_button.setStyleSheet(button_style_sheet)
-        self.view_llm_terminal_button.setIconSize(button_icon_size)
+        self.view_llm_terminal_button.setStyleSheet(self.button_style_sheet)
+        self.view_llm_terminal_button.setIconSize(self.button_icon_size)
 
-    def _init_layout_phase1(self):
+    def _init_project_session_widgets(self):  # NEW Method
+        self.projects_list_widget = QListWidget()
+        self.projects_list_widget.setObjectName("ProjectsListWidget")
+        self.projects_list_widget.setFont(self.button_font)
+        self.projects_list_widget.setToolTip("Select a project")
+        self.projects_list_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.projects_list_widget.setMaximumHeight(150)  # Example max height
+
+        self.sessions_list_widget = QListWidget()
+        self.sessions_list_widget.setObjectName("SessionsListWidget")
+        self.sessions_list_widget.setFont(self.button_font)
+        self.sessions_list_widget.setToolTip("Select a session within the current project")
+        self.sessions_list_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.new_project_button = QPushButton(" New Project")
+        self.new_project_button.setFont(self.button_font)
+        self.new_project_button.setIcon(self._get_qta_icon('fa5s.folder-plus', color="#56B6C2"))
+        self.new_project_button.setToolTip("Create a new project")
+        self.new_project_button.setObjectName("newProjectButton")
+        self.new_project_button.setStyleSheet(self.button_style_sheet)
+        self.new_project_button.setIconSize(self.button_icon_size)
+
+    def _init_layout_phase1(self):  # MODIFIED Method
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
 
+        # Projects & Sessions Group
+        project_session_layout = QVBoxLayout(self.projects_group)
+        project_session_layout.setSpacing(6)
+        project_session_layout.addWidget(QLabel("Projects:"))
+        project_session_layout.addWidget(self.projects_list_widget)
+        project_session_layout.addWidget(self.new_project_button)
+        project_session_layout.addSpacing(10)
+        project_session_layout.addWidget(QLabel("Sessions (Current Project):"))
+        project_session_layout.addWidget(self.sessions_list_widget)
+        # new_chat_button (New Session) is now effectively the "New Session" button
+        # and will be placed in the "Actions" group for consistency with "New Chat" naming.
+        main_layout.addWidget(self.projects_group)
+
+        # LLM Configuration Group
         llm_config_layout = QVBoxLayout(self.llm_config_group)
         llm_config_layout.setSpacing(6)
         llm_config_layout.addWidget(self.chat_llm_label)
@@ -129,16 +179,18 @@ class LeftControlPanel(QWidget):
         llm_config_layout.addWidget(self.configure_ai_personality_button)
         main_layout.addWidget(self.llm_config_group)
 
+        # Actions Group
         actions_layout = QVBoxLayout(self.actions_group)
         actions_layout.setSpacing(6)
-        actions_layout.addWidget(self.new_chat_button)
+        actions_layout.addWidget(self.new_chat_button)  # This is "New Session"
         actions_layout.addWidget(self.view_llm_terminal_button)
         main_layout.addWidget(self.actions_group)
 
-        main_layout.addStretch(1)
+        main_layout.addStretch(1)  # Pushes everything up
         self.setLayout(main_layout)
 
     def _connect_signals_phase1(self):
+        # new_chat_button now effectively means "new session for current project"
         self.new_chat_button.clicked.connect(lambda: self._event_bus.newChatRequested.emit())
         self.configure_ai_personality_button.clicked.connect(
             lambda: self._event_bus.chatLlmPersonalityEditRequested.emit())
@@ -148,6 +200,165 @@ class LeftControlPanel(QWidget):
 
         self._event_bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
         self._event_bus.backendBusyStateChanged.connect(self._handle_backend_busy_state_changed_event_phase1)
+
+    def _connect_project_session_signals(self):  # NEW Method
+        self.new_project_button.clicked.connect(self._on_new_project_requested)
+        self.projects_list_widget.currentItemChanged.connect(self._on_project_selected)
+        self.sessions_list_widget.currentItemChanged.connect(self._on_session_selected)
+
+        # Connect to ProjectManager signals (MainWindow should relay these or pass ProjectManager instance)
+        # For simplicity, assuming MainWindow will call public methods on LeftPanel to update.
+        # If LeftPanel had direct access to ProjectManager instance, it could connect directly:
+        if self._project_manager:
+            self._project_manager.projectsLoaded.connect(self.populate_projects_list)
+            self._project_manager.projectCreated.connect(self._handle_project_created)  # Connect to internal slot
+            self._project_manager.sessionCreated.connect(self._handle_session_created)  # Connect to internal slot
+            self._project_manager.projectSwitched.connect(self._handle_project_switched)  # Connect to internal slot
+            self._project_manager.sessionSwitched.connect(self._handle_session_switched)  # Connect to internal slot
+
+    def load_initial_projects_and_sessions(self):  # NEW Method
+        logger.debug("LCP: Loading initial projects and sessions.")
+        all_projects = self._project_manager.get_all_projects()
+        self.populate_projects_list(all_projects)
+
+        current_project = self._project_manager.get_current_project()
+        if current_project:
+            self._select_project_in_list(current_project.id)
+            self.update_sessions_list(current_project.id)  # This will also select current session
+        else:
+            self.sessions_list_widget.clear()
+
+    @Slot()
+    def _on_new_project_requested(self):  # NEW Method
+        project_name, ok = QInputDialog.getText(self, "New Project", "Enter project name:")
+        if ok and project_name:
+            # Description can be added later or via another dialog
+            self._event_bus.createNewProjectRequested.emit(project_name, "")  # Orchestrator listens to this
+            # ProjectManager will emit projectCreated, which will update the list.
+        else:
+            logger.info("New project creation cancelled or empty name.")
+
+    @Slot(QListWidgetItem, QListWidgetItem)  # NEW Method
+    def _on_project_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]):
+        if self._is_programmatic_selection_change or not current:
+            return
+        project_id = current.data(self.PROJECT_ID_ROLE)
+        if project_id and (not previous or project_id != previous.data(self.PROJECT_ID_ROLE)):
+            logger.info(f"LCP: Project selected by user: {project_id}")
+            self._project_manager.switch_to_project(project_id)
+            # projectSwitched signal from ProjectManager will call _handle_project_switched
+
+    @Slot(QListWidgetItem, QListWidgetItem)  # NEW Method
+    def _on_session_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]):
+        if self._is_programmatic_selection_change or not current:
+            return
+        session_id = current.data(self.SESSION_ID_ROLE)
+        current_project = self._project_manager.get_current_project()
+        if session_id and current_project and (not previous or session_id != previous.data(self.SESSION_ID_ROLE)):
+            logger.info(f"LCP: Session selected by user: {session_id} in project {current_project.id}")
+            self._project_manager.switch_to_session(session_id)
+            # sessionSwitched signal from ProjectManager will call _handle_session_switched
+
+    # --- Slots to update UI based on ProjectManager signals ---
+    @Slot(list)  # List[Project] # NEW Method
+    def populate_projects_list(self, projects: List[Project]):
+        logger.debug(f"LCP: Populating projects list with {len(projects)} projects.")
+        self._is_programmatic_selection_change = True
+        self.projects_list_widget.clear()
+        for project in projects:
+            item = QListWidgetItem(project.name)
+            item.setData(self.PROJECT_ID_ROLE, project.id)
+            item.setToolTip(project.description or project.name)
+            self.projects_list_widget.addItem(item)
+        self._is_programmatic_selection_change = False
+
+        current_proj_obj = self._project_manager.get_current_project()
+        if current_proj_obj:
+            self._select_project_in_list(current_proj_obj.id)
+
+    @Slot(str)  # project_id # NEW Method
+    def _handle_project_created(self, project_id: str):
+        project = self._project_manager.get_project_by_id(project_id)  # Requires get_project_by_id in ProjectManager
+        if project:
+            self._is_programmatic_selection_change = True
+            item = QListWidgetItem(project.name)
+            item.setData(self.PROJECT_ID_ROLE, project.id)
+            item.setToolTip(project.description or project.name)
+            self.projects_list_widget.addItem(item)
+            # self.projects_list_widget.setCurrentItem(item) # Optionally select new project
+            self._is_programmatic_selection_change = False
+
+    @Slot(str)  # project_id # NEW Method
+    def _handle_project_switched(self, project_id: str):
+        logger.debug(f"LCP: Handling project switched to {project_id}")
+        self._select_project_in_list(project_id)
+        self.update_sessions_list(project_id)
+
+    @Slot(str, str)  # project_id, session_id # NEW Method
+    def _handle_session_created(self, project_id: str, session_id: str):
+        current_project = self._project_manager.get_current_project()
+        if current_project and current_project.id == project_id:
+            session = self._project_manager.get_session_by_id(session_id)  # Requires get_session_by_id
+            if session:
+                self._is_programmatic_selection_change = True
+                item = QListWidgetItem(session.name)
+                item.setData(self.SESSION_ID_ROLE, session.id)
+                self.sessions_list_widget.addItem(item)
+                # self.sessions_list_widget.setCurrentItem(item) # Optionally select new session
+                self._is_programmatic_selection_change = False
+
+    @Slot(str, str)  # project_id, session_id # NEW Method
+    def _handle_session_switched(self, project_id: str, session_id: str):
+        logger.debug(f"LCP: Handling session switched to P:{project_id} S:{session_id}")
+        current_project = self._project_manager.get_current_project()
+        if current_project and current_project.id == project_id:
+            # Ensure sessions list is for the current project
+            # If project hasn't changed, update_sessions_list might not have been called by project_switched
+            # so call it here to be sure, or ensure project_switched always updates sessions.
+            # self.update_sessions_list(project_id) # This might cause re-selection loop if not careful
+            self._select_session_in_list(session_id)
+
+    def _select_project_in_list(self, project_id_to_select: str):  # NEW Method
+        self._is_programmatic_selection_change = True
+        for i in range(self.projects_list_widget.count()):
+            item = self.projects_list_widget.item(i)
+            if item and item.data(self.PROJECT_ID_ROLE) == project_id_to_select:
+                if self.projects_list_widget.currentItem() != item:
+                    self.projects_list_widget.setCurrentItem(item)
+                break
+        self._is_programmatic_selection_change = False
+
+    def _select_session_in_list(self, session_id_to_select: str):  # NEW Method
+        self._is_programmatic_selection_change = True
+        for i in range(self.sessions_list_widget.count()):
+            item = self.sessions_list_widget.item(i)
+            if item and item.data(self.SESSION_ID_ROLE) == session_id_to_select:
+                if self.sessions_list_widget.currentItem() != item:
+                    self.sessions_list_widget.setCurrentItem(item)
+                break
+        self._is_programmatic_selection_change = False
+
+    def update_sessions_list(self, project_id: str):  # NEW Method
+        logger.debug(f"LCP: Updating sessions list for project ID: {project_id}")
+        self._is_programmatic_selection_change = True
+        self.sessions_list_widget.clear()
+        sessions = self._project_manager.get_project_sessions(project_id)
+        for session in sessions:
+            item = QListWidgetItem(session.name)
+            item.setData(self.SESSION_ID_ROLE, session.id)
+            self.sessions_list_widget.addItem(item)
+
+        current_session_obj = self._project_manager.get_current_session()
+        if current_session_obj and current_session_obj.project_id == project_id:
+            self._select_session_in_list(current_session_obj.id)
+        elif sessions:  # If no current session but sessions exist, select the first one
+            self._select_session_in_list(sessions[0].id)
+            # And tell ProjectManager to make it current (if it's not already)
+            # This might be better handled by ensuring ProjectManager always has a current session if one exists.
+            if not current_session_obj or current_session_obj.id != sessions[0].id:
+                self._project_manager.switch_to_session(sessions[0].id)
+
+        self._is_programmatic_selection_change = False
 
     def _load_initial_model_settings_phase1(self):
         self._is_programmatic_model_change = True
@@ -163,7 +374,7 @@ class LeftControlPanel(QWidget):
 
         active_specialized_backend_id = constants.GENERATOR_BACKEND_ID
         active_specialized_model_name = self.chat_manager.get_model_for_backend(active_specialized_backend_id)
-        if not active_specialized_model_name:  # Initialize if not set
+        if not active_specialized_model_name:
             active_specialized_model_name = constants.DEFAULT_OLLAMA_GENERATOR_MODEL
             if self.chat_manager:
                 self.chat_manager.set_model_for_backend(active_specialized_backend_id, active_specialized_model_name)
@@ -179,6 +390,7 @@ class LeftControlPanel(QWidget):
         self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
 
     def _populate_chat_llm_combo_box_phase1(self):
+        # ... (remains the same as your version)
         self.chat_llm_combo_box.clear()
         models_added_count = 0
         all_backend_ids = self.chat_manager.get_all_available_backend_ids()
@@ -201,10 +413,9 @@ class LeftControlPanel(QWidget):
                 elif backend_id == "ollama_chat_default":
                     available_models_for_backend = [constants.DEFAULT_OLLAMA_CHAT_MODEL]
                 elif backend_id == "gpt_chat_default":
-                    available_models_for_backend = ["gpt-4o", "gpt-3.5-turbo"]
+                    available_models_for_backend = ["gpt-4o", "gpt-3.5-turbo"]  # Example
 
             for model_name_str in available_models_for_backend:
-                # FIXED: Check actual backend type instead of DEFAULT_CHAT_BACKEND_ID
                 display_name_prefix = ""
                 if backend_id == "gemini_chat_default":
                     display_name_prefix = "Gemini: "
@@ -230,6 +441,7 @@ class LeftControlPanel(QWidget):
             self.chat_llm_combo_box.setEnabled(True)
 
     def _populate_specialized_llm_combo_box_phase1(self):
+        # ... (remains the same as your version)
         self.specialized_llm_combo_box.clear()
         models_added_count = 0
 
@@ -255,6 +467,7 @@ class LeftControlPanel(QWidget):
 
     def _set_combo_box_selection_phase1(self, combo_box: QComboBox, target_backend_id: str,
                                         target_model_name: Optional[str]):
+        # ... (remains the same as your version)
         for i in range(combo_box.count()):
             item_data = combo_box.itemData(i)
             if isinstance(item_data, dict) and \
@@ -264,18 +477,19 @@ class LeftControlPanel(QWidget):
                     combo_box.setCurrentIndex(i)
                 return
 
-        for i in range(combo_box.count()):
+        for i in range(combo_box.count()):  # Fallback to first model of the backend
             item_data = combo_box.itemData(i)
             if isinstance(item_data, dict) and item_data.get("backend_id") == target_backend_id:
                 if combo_box.currentIndex() != i:
                     combo_box.setCurrentIndex(i)
                 return
 
-        if combo_box.count() > 0:
+        if combo_box.count() > 0:  # Default to first item if nothing matches
             combo_box.setCurrentIndex(0)
 
     @Slot(int)
     def _on_chat_llm_selected_phase1(self, index: int):
+        # ... (remains the same as your version)
         if self._is_programmatic_model_change or index < 0:
             return
 
@@ -296,6 +510,7 @@ class LeftControlPanel(QWidget):
 
     @Slot(int)
     def _on_specialized_llm_selected_phase1(self, index: int):
+        # ... (remains the same as your version)
         if self._is_programmatic_model_change or index < 0:
             return
 
@@ -317,6 +532,7 @@ class LeftControlPanel(QWidget):
     @Slot(str, str, bool, list)
     def _handle_backend_configuration_changed_event_phase1(self, backend_id: str, model_name: str, is_configured: bool,
                                                            available_models: list[Any]):
+        # ... (remains the same as your version)
         logger.debug(f"LP: Backend config changed event for '{backend_id}'. Updating combo boxes.")
         self._is_programmatic_model_change = True
         self.chat_llm_combo_box.blockSignals(True)
@@ -349,13 +565,22 @@ class LeftControlPanel(QWidget):
         status = "(Custom Persona Active)" if active else "(Default Persona)"
         self.configure_ai_personality_button.setToolTip(f"{tooltip_base}\nStatus: {status}")
 
-    def set_enabled_state(self, enabled: bool, is_busy: bool):
+    def set_enabled_state(self, enabled: bool, is_busy: bool):  # MODIFIED: Enable/disable project/session UI
         effective_enabled_not_busy = enabled and not is_busy
-        self.chat_llm_combo_box.setEnabled(enabled)
+
+        # LLM Config
+        self.chat_llm_combo_box.setEnabled(enabled)  # Can change LLM even if busy, new config applies on next req
         self.specialized_llm_combo_box.setEnabled(enabled)
         self.configure_ai_personality_button.setEnabled(effective_enabled_not_busy)
-        self.new_chat_button.setEnabled(not is_busy)
-        self.view_llm_terminal_button.setEnabled(True)
+
+        # Chat Actions
+        self.new_chat_button.setEnabled(not is_busy)  # New Session
+        self.view_llm_terminal_button.setEnabled(True)  # Always enabled
+
+        # Project/Session Management
+        self.projects_list_widget.setEnabled(not is_busy)
+        self.sessions_list_widget.setEnabled(not is_busy)
+        self.new_project_button.setEnabled(not is_busy)
 
         label_color = "#C0C0C0" if enabled else "#707070"
         self.chat_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")

@@ -87,6 +87,31 @@ STYLE_PATHS_TO_CHECK = [
 ]
 BUBBLE_STYLESHEET_PATH = os.path.join(UI_DIR_PATH, BUBBLE_STYLESHEET_FILENAME)
 
+
+# --- RAG Specific Constants ---
+RAG_COLLECTIONS_DIR_NAME = "rag_collections"
+RAG_COLLECTIONS_PATH = os.path.join(USER_DATA_DIR, RAG_COLLECTIONS_DIR_NAME)
+GLOBAL_COLLECTION_ID = "global_knowledge" # For RAG chunks not tied to a specific project
+RAG_NUM_RESULTS = 5 # Number of top results to retrieve from vector DB by default
+RAG_CHUNK_SIZE = 1000 # Default text chunk size for RAG
+RAG_CHUNK_OVERLAP = 150 # Default text chunk overlap for RAG
+RAG_MAX_FILE_SIZE_MB = 50 # Max file size in MB for RAG processing
+MAX_SCAN_DEPTH = 5 # Max directory recursion depth for RAG scans
+
+ALLOWED_TEXT_EXTENSIONS = {
+    '.txt', '.md', '.markdown', '.rst',
+    '.py', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env',
+    '.c', '.cpp', '.h', '.hpp', '.java', '.go', '.rs', '.swift', '.php', '.rb',
+    '.pdf', '.docx', # Document formats
+}
+
+DEFAULT_IGNORED_DIRS = {
+    '.git', '.idea', '__pycache__', 'venv', 'node_modules', 'build', 'dist',
+    '.pytest_cache', '.vscode', '.env', '.DS_Store', 'logs',
+}
+# --- End RAG Specific Constants ---
+
+
 LOG_LEVEL = "DEBUG"
 LOG_FILE_NAME = "ava_pys6_phase1.log"
 LOG_FORMAT = '%(asctime)s.%(msecs)03d - %(levelname)-8s - [%(name)s:%(module)s.%(funcName)s:%(lineno)d] - %(message)s'

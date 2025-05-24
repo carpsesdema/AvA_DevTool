@@ -9,16 +9,25 @@ logger = logging.getLogger(__name__)
 class EventBus(QObject):
     _instance: Optional['EventBus'] = None
 
-    userMessageSubmitted = Signal(str, list)
-    newChatRequested = Signal()
-    chatLlmPersonalitySubmitted = Signal(str, str)
-    chatLlmSelectionChanged = Signal(str, str)
-    specializedLlmSelectionChanged = Signal(str, str)
+    # User Actions
+    userMessageSubmitted = Signal(str, list)  # text, image_data_list
+    newChatRequested = Signal()  # UI requests CM to signal orchestrator for new session
+    chatLlmPersonalitySubmitted = Signal(str, str)  # new_prompt, backend_id_for_persona
+    chatLlmSelectionChanged = Signal(str, str)  # backend_id, model_name
+    specializedLlmSelectionChanged = Signal(str, str)  # backend_id, model_name
 
+    # ADDED: Orchestrator-level request for new session
+    createNewSessionForProjectRequested = Signal(str)  # project_id (ChatManager emits this)
+
+    # UI Navigation / Dialog Triggers
     showLlmLogWindowRequested = Signal()
     chatLlmPersonalityEditRequested = Signal()
-    viewCodeViewerRequested = Signal()  # ADDED: Missing signal for DialogService
+    viewCodeViewerRequested = Signal()
+    createNewProjectRequested = Signal(str, str)
+    openProjectSelectorRequested = Signal()
+    renameCurrentSessionRequested = Signal(str)
 
+    # Backend & LLM Communication
     backendConfigurationChanged = Signal(str, str, bool, list)
     llmRequestSent = Signal(str, str)
     llmStreamStarted = Signal(str)
@@ -26,21 +35,24 @@ class EventBus(QObject):
     llmResponseCompleted = Signal(str, object, dict)
     llmResponseError = Signal(str, str)
 
-    newMessageAddedToHistory = Signal(str, object)
-    activeSessionHistoryCleared = Signal(str)
-    activeProjectChanged = Signal(str)
+    # Chat History & Session Management (MODIFIED to include project/session IDs)
+    newMessageAddedToHistory = Signal(str, str, object)  # project_id, session_id, chat_message_obj
+    activeSessionHistoryCleared = Signal(str, str)  # project_id, session_id (for UI to clear its view)
+    activeSessionHistoryLoaded = Signal(str, str, list)  # project_id, session_id, history_list (for UI to load)
+    messageChunkReceivedForSession = Signal(str, str, str, str)  # project_id, session_id, request_id, chunk_text
+    messageFinalizedForSession = Signal(str, str, str, object, dict,
+                                        bool)  # project_id, session_id, request_id, message_obj, usage_dict, is_error
 
+    # Global UI Updates
     uiStatusUpdateGlobal = Signal(str, str, bool, int)
     uiErrorGlobal = Signal(str, bool)
     uiTextCopied = Signal(str, str)
     uiInputBarBusyStateChanged = Signal(bool)
     backendBusyStateChanged = Signal(bool)
 
-    # NEW: Signal for when generated code files are ready to display
-    modificationFileReadyForDisplay = Signal(str, str)  # filename, content
-
-    # NEW: Signal for when code viewer requests to apply changes
-    applyFileChangeRequested = Signal(str, str, str, str)  # project_id, relative_path, content, focus_prefix
+    # Code Generation / Modification Flow
+    modificationFileReadyForDisplay = Signal(str, str)
+    applyFileChangeRequested = Signal(str, str, str, str)
 
     @staticmethod
     def get_instance() -> 'EventBus':
