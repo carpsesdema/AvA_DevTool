@@ -6,9 +6,18 @@ import sys
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+# --- Ensure the project root is in sys.path for absolute imports ---
+# This helps resolve imports like 'from services.X import Y'
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+# --- End project root sys.path setup ---
+
+# --- PySide6 Imports (Explicitly added back for clarity and robustness) ---
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
+# --- End PySide6 Imports ---
 
 try:
     import qasync
@@ -38,6 +47,7 @@ except ImportError as e:
             "Failed to import 'utils.constants'. This is often a PYTHONPATH issue or "
             "you might be running 'main.py' from a subdirectory instead of the project root."
         )
+    # The QMessageBox here relies on QApplication, which is now imported explicitly above.
     try:
         _dummy_app = QApplication.instance() or QApplication(sys.argv)
         QMessageBox.critical(None, "Fatal Import Error",
@@ -134,16 +144,9 @@ async def async_main():
 
         logger.info("Instantiating ApplicationOrchestrator...")
 
-        class P1UploadService:
-            def is_vector_db_ready(self, *args, **kwargs): return False
-
-            def __init__(self): logger.debug("P1UploadService (placeholder) initialized.")
-
-        upload_service_p1 = P1UploadService()
-
+        # Removed P1UploadService placeholder as ApplicationOrchestrator now initializes real UploadService
         app_orchestrator = ApplicationOrchestrator(
-            project_manager=project_manager,
-            upload_service_placeholder=upload_service_p1
+            project_manager=project_manager
         )
         logger.info("ApplicationOrchestrator instantiated.")
 
@@ -151,14 +154,14 @@ async def async_main():
         chat_manager = ChatManager(orchestrator=app_orchestrator)
         logger.info("ChatManager instantiated.")
 
-        if app_orchestrator:  # ADDED: Set chat_manager in orchestrator
+        if app_orchestrator:
             app_orchestrator.set_chat_manager(chat_manager)
 
         logger.info("Instantiating MainWindow...")
         main_window = MainWindow(chat_manager=chat_manager, app_base_path=constants.APP_BASE_DIR)
         logger.info("MainWindow instantiated.")
 
-        if app_orchestrator:  # ADDED: Initialize app state after all main components are up
+        if app_orchestrator:
             app_orchestrator.initialize_application_state()
 
 

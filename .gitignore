@@ -225,4 +225,4 @@ ui_*.h
 # Compiled Python files in subdirectories
 **/__pycache__/
 **/*.pyc
-**/*.pyo
+**/*.pyo!/.venv/

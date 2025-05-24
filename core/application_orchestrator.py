@@ -1,6 +1,6 @@
 # core/application_orchestrator.py
 import logging
-from typing import Dict, Optional, Any, List, TYPE_CHECKING  # ADDED TYPE_CHECKING
+from typing import Dict, Optional, Any, List, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Slot
 
@@ -12,12 +12,16 @@ try:
     from backends.backend_coordinator import BackendCoordinator
     from core.event_bus import EventBus
     from services.llm_communication_logger import LlmCommunicationLogger
+    from services.upload_service import UploadService  # ADDED
+    from core.rag_handler import RagHandler  # ADDED
     from utils import constants
     from services.project_service import ProjectManager, Project, ChatSession
     from core.models import ChatMessage
 except ImportError as e:
     ProjectManager = type("ProjectManager", (object,), {})  # type: ignore
     ChatMessage = type("ChatMessage", (object,), {})  # type: ignore
+    UploadService = type("UploadService", (object,), {})  # type: ignore
+    RagHandler = type("RagHandler", (object,), {})  # type: ignore
     logging.getLogger(__name__).critical(f"Critical import error in ApplicationOrchestrator: {e}", exc_info=True)
     raise
 
@@ -31,8 +35,7 @@ logger = logging.getLogger(__name__)
 class ApplicationOrchestrator(QObject):
     def __init__(self,
                  project_manager: ProjectManager,  # type: ignore
-                 upload_service_placeholder: Any,
-                 parent: Optional[QObject] = None):
+                 parent: Optional[QObject] = None):  # Removed upload_service_placeholder from signature
         super().__init__(parent)
         logger.info("ApplicationOrchestrator initializing...")
 
@@ -48,6 +51,7 @@ class ApplicationOrchestrator(QObject):
 
         self.chat_manager: Optional['ChatManager'] = None  # Use string literal for type hint
 
+        # --- LLM Backend Adapters ---
         self.gemini_chat_adapter = GeminiAdapter()
         self.ollama_chat_adapter = OllamaAdapter()
         self.gpt_chat_adapter = GPTAdapter()
@@ -78,13 +82,19 @@ class ApplicationOrchestrator(QObject):
             logger.critical(f"An unexpected error occurred instantiating BackendCoordinator: {e_bc}", exc_info=True)
             raise
 
+        # --- RAG Services (NEW) ---
+        # UploadService internally manages FileHandler, Chunking, CodeAnalysis, and VectorDB (Chroma)
+        self.upload_service = UploadService()
+        # RagHandler needs access to UploadService (for querying) and VectorDBService (for direct readiness/status checks)
+        # Accessing _vector_db_service via UploadService for now. A public getter on UploadService could be added later.
+        self.rag_handler = RagHandler(self.upload_service, self.upload_service._vector_db_service)
+
         self.llm_communication_logger: Optional[LlmCommunicationLogger] = None
         try:
             self.llm_communication_logger = LlmCommunicationLogger(parent=self)
         except Exception as e_logger:
             logger.error(f"Failed to instantiate LlmCommunicationLogger: {e_logger}", exc_info=True)
 
-        self._upload_service_placeholder = upload_service_placeholder
         self._connect_event_bus()
         logger.info("ApplicationOrchestrator initialization complete.")
 
@@ -218,5 +228,16 @@ class ApplicationOrchestrator(QObject):
     def get_project_manager(self) -> ProjectManager:  # type: ignore
         return self.project_manager
 
-    def get_upload_service_placeholder(self) -> Any:
-        return self._upload_service_placeholder
+    def get_upload_service(self) -> UploadService:  # NEW GETTER for UploadService
+        """Returns the initialized UploadService instance."""
+        if not hasattr(self, 'upload_service') or self.upload_service is None:
+            logger.critical("UploadService accessed before proper initialization in Orchestrator.")
+            raise AttributeError("UploadService not initialized.")
+        return self.upload_service
+
+    def get_rag_handler(self) -> RagHandler:  # NEW GETTER for RagHandler
+        """Returns the initialized RagHandler instance."""
+        if not hasattr(self, 'rag_handler') or self.rag_handler is None:
+            logger.critical("RagHandler accessed before proper initialization in Orchestrator.")
+            raise AttributeError("RagHandler not initialized.")
+        return self.rag_handler
