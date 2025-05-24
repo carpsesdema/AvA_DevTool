@@ -14,6 +14,8 @@ try:
     from services.llm_communication_logger import LlmCommunicationLogger
     from utils import constants
     from config import get_gemini_api_key, get_openai_api_key
+    from core.user_input_handler import UserInputHandler, UserInputIntent
+    from core.plan_and_code_coordinator import PlanAndCodeCoordinator
 except ImportError as e:
     logging.getLogger(__name__).critical(f"Critical import error in ChatManager: {e}", exc_info=True)
     raise
@@ -34,6 +36,13 @@ class ChatManager(QObject):
         self._event_bus = orchestrator.get_event_bus()
         self._backend_coordinator = orchestrator.get_backend_coordinator()
         self._llm_comm_logger = orchestrator.get_llm_communication_logger()
+        self._user_input_handler = UserInputHandler()
+        self._plan_and_code_coordinator = PlanAndCodeCoordinator(
+            backend_coordinator=self._backend_coordinator,
+            event_bus=self._event_bus,
+            llm_comm_logger=self._llm_comm_logger,
+            parent=self
+        )
 
         self._current_chat_history: List[ChatMessage] = []
 
@@ -48,7 +57,6 @@ class ChatManager(QObject):
 
         self._active_specialized_backend_id: str = constants.GENERATOR_BACKEND_ID
         self._active_specialized_model_name: str = constants.DEFAULT_OLLAMA_GENERATOR_MODEL
-        self._active_specialized_personality_prompt: Optional[str] = None
 
         self._active_temperature: float = 0.7
         self._is_chat_backend_configured: bool = False
@@ -63,7 +71,7 @@ class ChatManager(QObject):
         self._configure_backend(self._active_chat_backend_id, self._active_chat_model_name,
                                 self._active_chat_personality_prompt)
         self._configure_backend(self._active_specialized_backend_id, self._active_specialized_model_name,
-                                self._active_specialized_personality_prompt)
+                                constants.CODER_AI_SYSTEM_PROMPT)
 
     def _connect_event_bus_subscriptions(self):
         logger.debug("ChatManager connecting EventBus subscriptions...")
@@ -92,12 +100,17 @@ class ChatManager(QObject):
     def _configure_backend(self, backend_id: str, model_name: str, system_prompt: Optional[str]):
         logger.info(f"CM: Configuring backend '{backend_id}' with model '{model_name}'")
         api_key_to_use: Optional[str] = None
+        actual_system_prompt = system_prompt
+
+        if backend_id == constants.GENERATOR_BACKEND_ID:
+            actual_system_prompt = constants.CODER_AI_SYSTEM_PROMPT
+            logger.info(f"CM: Using CODER_AI_SYSTEM_PROMPT for {backend_id}")
 
         if backend_id == "gemini_chat_default":
             api_key_to_use = get_gemini_api_key()
         elif backend_id == "gpt_chat_default":
             api_key_to_use = get_openai_api_key()
-        elif backend_id == constants.GENERATOR_BACKEND_ID:  # Ollama generator
+        elif backend_id == constants.GENERATOR_BACKEND_ID:
             api_key_to_use = None
         elif backend_id == "ollama_chat_default":
             api_key_to_use = None
@@ -117,7 +130,7 @@ class ChatManager(QObject):
             backend_id=backend_id,
             api_key=api_key_to_use,
             model_name=model_name,
-            system_prompt=system_prompt
+            system_prompt=actual_system_prompt
         )
 
     @Slot(str, str, bool, list)
@@ -145,6 +158,7 @@ class ChatManager(QObject):
         elif is_active_specialized_backend:
             if is_configured:
                 logger.info(f"CM: Active Specialized Backend '{backend_id}' for model '{model_name}' configured.")
+                self._emit_status_update(f"Specialized LLM {model_name} ready.", "#98c379", True, 3000)
             else:
                 last_error = self._backend_coordinator.get_last_error_for_backend(backend_id)
                 err_msg = f"Failed to configure Specialized LLM {backend_id} ({model_name}): {last_error or 'Unknown'}"
@@ -154,60 +168,98 @@ class ChatManager(QObject):
     @Slot(str, list)
     def handle_user_message(self, text: str, image_data: List[Dict[str, Any]]):
         logger.info(f"CM: User message: '{text[:50]}...'")
-        text_stripped = text.strip()
-        if not text_stripped:
+
+        processed_input = self._user_input_handler.process_input(text, image_data)
+        user_message_text_stripped = processed_input.original_query.strip()
+
+        if not user_message_text_stripped and not (
+                image_data and processed_input.intent == UserInputIntent.NORMAL_CHAT):
+            logger.info("CM: Empty text and no images for normal chat, or not a normal chat intent. No action.")
             return
 
-        if self._current_llm_request_id:
+        if self._current_llm_request_id and processed_input.intent == UserInputIntent.NORMAL_CHAT:
             self._emit_status_update("Please wait for the current AI response.", "#e5c07b", True, 2500)
             return
 
-        if not self._is_chat_backend_configured:
-            err_msg = "Cannot send: Chat AI backend not configured."
-            logger.error(err_msg)
-            self._emit_status_update(err_msg, "#FF6B6B")
-            error_chat_msg = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
-                                         parts=[f"[Error: Chat Backend not ready. Your message: '{text_stripped}']"])
-            self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", error_chat_msg)
-            return
+        user_message_parts = []
+        if user_message_text_stripped:
+            user_message_parts.append(user_message_text_stripped)
+        if image_data:  # Assuming image_data is already List[Dict[str,Any]] for image parts
+            user_message_parts.extend(image_data)
 
-        user_message = ChatMessage(role=USER_ROLE, parts=[text_stripped])
+        user_message = ChatMessage(role=USER_ROLE, parts=user_message_parts)
         self._current_chat_history.append(user_message)
         self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", user_message)
-        self._log_llm_comm("USER", text_stripped)
+        self._log_llm_comm("USER", user_message_text_stripped)
 
-        history_for_llm = self._current_chat_history[:]
-        init_success, init_error_msg, assigned_request_id = self._backend_coordinator.initiate_llm_chat_request(
-            target_backend_id=self._active_chat_backend_id,
-            history_to_send=history_for_llm,
-            options={"temperature": self._active_temperature}
-        )
+        if processed_input.intent == UserInputIntent.NORMAL_CHAT:
+            if not self._is_chat_backend_configured:
+                err_msg = "Cannot send: Chat AI backend not configured."
+                logger.error(err_msg)
+                self._emit_status_update(err_msg, "#FF6B6B")
+                error_chat_msg = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
+                                             parts=[
+                                                 f"[Error: Chat Backend not ready. Your message: '{user_message_text_stripped}']"])
+                self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", error_chat_msg)
+                return
 
-        if not init_success or not assigned_request_id:
-            err_ui = f"Failed to start chat: {init_error_msg or 'Unknown'}"
-            logger.error(f"CM: BC.initiate_llm_chat_request FAILED. {err_ui}")
-            self._emit_status_update(err_ui, "#FF6B6B")
-            error_chat_msg = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
-                                         parts=[f"[Error sending: {init_error_msg}]"])
-            self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", error_chat_msg)
-            return
+            history_for_llm = self._current_chat_history[:]
+            init_success, init_error_msg, assigned_request_id = self._backend_coordinator.initiate_llm_chat_request(
+                target_backend_id=self._active_chat_backend_id,
+                history_to_send=history_for_llm,
+                options={"temperature": self._active_temperature}
+            )
 
-        self._current_llm_request_id = assigned_request_id
-        ai_placeholder_msg = ChatMessage(id=self._current_llm_request_id, role=MODEL_ROLE, parts=[""],
-                                         loading_state=MessageLoadingState.LOADING)
-        self._current_chat_history.append(ai_placeholder_msg)
-        self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", ai_placeholder_msg)
-        self._emit_status_update(f"Sending to {self._active_chat_model_name}...", "#61afef")
+            if not init_success or not assigned_request_id:
+                err_ui = f"Failed to start chat: {init_error_msg or 'Unknown'}"
+                logger.error(f"CM: BC.initiate_llm_chat_request FAILED. {err_ui}")
+                self._emit_status_update(err_ui, "#FF6B6B")
+                error_chat_msg = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
+                                             parts=[f"[Error sending: {init_error_msg}]"])
+                self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", error_chat_msg)
+                return
 
-        self._backend_coordinator.start_llm_streaming_task(
-            request_id=self._current_llm_request_id,
-            target_backend_id=self._active_chat_backend_id,
-            history_to_send=history_for_llm,
-            is_modification_response_expected=False,
-            options={"temperature": self._active_temperature},
-            request_metadata={"purpose": "p1_normal_chat", "user_query_start": text_stripped[:30],
-                              "project_id": "p1_chat_context"}
-        )
+            self._current_llm_request_id = assigned_request_id
+            ai_placeholder_msg = ChatMessage(id=self._current_llm_request_id, role=MODEL_ROLE, parts=[""],
+                                             loading_state=MessageLoadingState.LOADING)
+            self._current_chat_history.append(ai_placeholder_msg)
+            self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", ai_placeholder_msg)
+            self._emit_status_update(f"Sending to {self._active_chat_model_name}...", "#61afef")
+
+            self._backend_coordinator.start_llm_streaming_task(
+                request_id=self._current_llm_request_id,
+                target_backend_id=self._active_chat_backend_id,
+                history_to_send=history_for_llm,
+                is_modification_response_expected=False,
+                options={"temperature": self._active_temperature},
+                request_metadata={"purpose": "p1_normal_chat", "user_query_start": user_message_text_stripped[:30],
+                                  "project_id": "p1_chat_context"}
+            )
+        elif processed_input.intent == UserInputIntent.PLAN_THEN_CODE_REQUEST:
+            logger.info(
+                f"CM: Delegating PLAN_THEN_CODE_REQUEST to PlanAndCodeCoordinator for: '{processed_input.original_query[:50]}...'")
+            if not self._is_chat_backend_configured:  # Planner uses chat LLM
+                self._emit_status_update("Planner LLM (Chat LLM) not configured. Cannot start planning.", "#e06c75",
+                                         True, 5000)
+                return
+            if not self._is_specialized_backend_configured:  # Code LLM
+                self._emit_status_update(
+                    "Code LLM (Specialized LLM) not configured. Cannot proceed with plan-then-code.", "#e06c75", True,
+                    5000)
+                return
+
+            self._plan_and_code_coordinator.start_planning_sequence(
+                user_query=processed_input.original_query,
+                chat_llm_backend_id=self._active_chat_backend_id,
+                chat_llm_model_name=self._active_chat_model_name,
+                chat_llm_temperature=self._active_temperature
+            )
+
+        else:
+            logger.warning(f"CM: Unknown intent from UserInputHandler: {processed_input.intent}")
+            system_message = ChatMessage(role=ERROR_ROLE, parts=[
+                f"[System: Could not determine how to handle your request: '{processed_input.original_query[:50]}...']"])
+            self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", system_message)
 
     @Slot()
     def start_new_chat_session(self):
@@ -223,18 +275,21 @@ class ChatManager(QObject):
 
     @Slot(str, str)
     def _handle_llm_request_sent(self, backend_id: str, request_id: str):
-        if request_id == self._current_llm_request_id:
-            self._event_bus.uiInputBarBusyStateChanged.emit(True)
+        if request_id == self._current_llm_request_id:  # Only normal chat requests set self._current_llm_request_id for now
+            if backend_id == self._active_chat_backend_id:
+                self._event_bus.uiInputBarBusyStateChanged.emit(True)
+        # For PlanAndCodeCoordinator requests, it manages its own busy states or signals.
 
     @Slot(str, str)
     def _handle_llm_stream_chunk(self, request_id: str, chunk_text: str):
-        if request_id == self._current_llm_request_id:
-            logger.debug(f"CM: Received chunk for {request_id}: '{chunk_text[:50]}...'")
+        if request_id == self._current_llm_request_id:  # Only normal chat requests
+            logger.debug(f"CM: Received chunk for chat request {request_id}: '{chunk_text[:50]}...'")
+        # PlanAndCodeCoordinator handles its own chunks if needed, or they're emitted to UI directly
 
     @Slot(str, object, dict)
     def _handle_llm_response_completed(self, request_id: str, completed_message_obj: object,
                                        usage_stats_dict: dict):
-        if request_id == self._current_llm_request_id:
+        if request_id == self._current_llm_request_id:  # Normal chat completion
             if isinstance(completed_message_obj, ChatMessage):
                 self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE", completed_message_obj.text)
                 updated_in_history = False
@@ -250,10 +305,11 @@ class ChatManager(QObject):
             self._current_llm_request_id = None
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
             self._emit_status_update(f"Ready. Last: {self._active_chat_model_name}", "#98c379")
+        # PlanAndCodeCoordinator handles its own completion events via its direct connection to EventBus
 
     @Slot(str, str)
     def _handle_llm_response_error(self, request_id: str, error_message_str: str):
-        if request_id == self._current_llm_request_id:
+        if request_id == self._current_llm_request_id:  # Normal chat error
             self._log_llm_comm(f"{self._active_chat_backend_id.upper()} ERROR", error_message_str)
             error_chat_msg = ChatMessage(id=request_id, role=ERROR_ROLE, parts=[f"[AI Error: {error_message_str}]"],
                                          loading_state=MessageLoadingState.ERROR)
@@ -268,6 +324,7 @@ class ChatManager(QObject):
             self._current_llm_request_id = None
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
             self._emit_status_update(f"Error: {error_message_str[:60]}...", "#FF6B6B")
+        # PlanAndCodeCoordinator handles its own error events via its direct connection to EventBus
 
     @Slot(str, str)
     def _handle_chat_llm_selection_event(self, backend_id: str, model_name: str):
@@ -275,7 +332,7 @@ class ChatManager(QObject):
         if self._active_chat_backend_id != backend_id or self._active_chat_model_name != model_name:
             self._active_chat_backend_id = backend_id
             self._active_chat_model_name = model_name
-            self._active_personality_prompt = None  # Reset personality when model/backend changes
+            self._active_chat_personality_prompt = None
             self._configure_backend(backend_id, model_name, self._active_chat_personality_prompt)
 
     @Slot(str, str)
@@ -284,7 +341,7 @@ class ChatManager(QObject):
         if self._active_specialized_backend_id != backend_id or self._active_specialized_model_name != model_name:
             self._active_specialized_backend_id = backend_id
             self._active_specialized_model_name = model_name
-            self._configure_backend(backend_id, model_name, self._active_specialized_personality_prompt)
+            self._configure_backend(backend_id, model_name, constants.CODER_AI_SYSTEM_PROMPT)
 
     @Slot(str, str)
     def _handle_personality_change_event(self, new_prompt: str, backend_id_for_persona: str):
@@ -293,9 +350,18 @@ class ChatManager(QObject):
             self._configure_backend(self._active_chat_backend_id, self._active_chat_model_name,
                                     self._active_chat_personality_prompt)
         elif backend_id_for_persona == self._active_specialized_backend_id:
-            self._active_specialized_personality_prompt = new_prompt.strip() if new_prompt and new_prompt.strip() else None
-            self._configure_backend(self._active_specialized_backend_id, self._active_specialized_model_name,
-                                    self._active_specialized_personality_prompt)
+            logger.warning(
+                f"CM: Personality change attempted for specialized backend '{backend_id_for_persona}'. This is usually fixed to CODER_AI_SYSTEM_PROMPT.")
+
+    def set_model_for_backend(self, backend_id: str, model_name: str):
+        if backend_id == self._active_chat_backend_id:
+            if self._active_chat_model_name != model_name:
+                self._active_chat_model_name = model_name
+                self._configure_backend(backend_id, model_name, self._active_chat_personality_prompt)
+        elif backend_id == self._active_specialized_backend_id:
+            if self._active_specialized_model_name != model_name:
+                self._active_specialized_model_name = model_name
+                self._configure_backend(backend_id, model_name, constants.CODER_AI_SYSTEM_PROMPT)
 
     def set_chat_temperature(self, temperature: float):
         if 0.0 <= temperature <= 2.0:
@@ -307,6 +373,15 @@ class ChatManager(QObject):
 
     def get_current_active_chat_backend_id(self) -> str:
         return self._active_chat_backend_id
+
+    def get_current_active_chat_model_name(self) -> str:
+        return self._active_chat_model_name
+
+    def get_current_active_specialized_backend_id(self) -> str:
+        return self._active_specialized_backend_id
+
+    def get_current_active_specialized_model_name(self) -> str:
+        return self._active_specialized_model_name
 
     def get_model_for_backend(self, backend_id: str) -> Optional[str]:
         if backend_id == self._active_chat_backend_id:
@@ -325,7 +400,7 @@ class ChatManager(QObject):
         return self._active_chat_personality_prompt
 
     def get_current_specialized_personality(self) -> Optional[str]:
-        return self._active_specialized_personality_prompt
+        return constants.CODER_AI_SYSTEM_PROMPT
 
     def get_current_chat_temperature(self) -> float:
         return self._active_temperature
