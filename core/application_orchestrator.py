@@ -119,6 +119,7 @@ class ApplicationOrchestrator(QObject):
 
     def _connect_event_bus(self):
         self.event_bus.createNewSessionForProjectRequested.connect(self._handle_create_new_session_requested)
+        self.event_bus.createNewProjectRequested.connect(self._handle_create_new_project_requested)  # ADDED THIS LINE
         self.event_bus.messageFinalizedForSession.connect(self._handle_message_finalized_for_session_persistence)
         if hasattr(self.project_manager, 'projectDeleted'):  # Check if signal exists before connecting
             self.project_manager.projectDeleted.connect(self._handle_project_deleted)  # type: ignore
@@ -162,6 +163,50 @@ class ApplicationOrchestrator(QObject):
             logger.error(
                 "Orchestrator: Failed to initialize or load a project/session. Chat functionality may be limited.")
             self.event_bus.uiErrorGlobal.emit("Failed to load or create an initial project/session.", True)
+
+    @Slot(str, str)  # ADDED THIS MISSING METHOD
+    def _handle_create_new_project_requested(self, project_name: str, project_description: str):
+        """Handle request to create a new project."""
+        logger.info(f"Orchestrator: Request to create new project: '{project_name}'")
+
+        if not project_name or not project_name.strip():
+            logger.warning("Orchestrator: Cannot create project with empty name")
+            self.event_bus.uiErrorGlobal.emit("Project name cannot be empty.", False)
+            return
+
+        try:
+            # Create the new project
+            new_project = self.project_manager.create_project(  # type: ignore
+                name=project_name.strip(),
+                description=project_description.strip() if project_description else ""
+            )
+
+            if new_project:
+                logger.info(f"Orchestrator: Successfully created project '{new_project.name}' (ID: {new_project.id})")
+
+                # Switch to the new project
+                if self.project_manager.switch_to_project(new_project.id):  # type: ignore
+                    # Get the default session that should have been created
+                    current_session = self.project_manager.get_current_session()  # type: ignore
+
+                    if current_session and self.chat_manager:
+                        logger.info(
+                            f"Orchestrator: Switching ChatManager to new project P:{new_project.id}/S:{current_session.id}")
+                        history_to_set: List[ChatMessage] = current_session.message_history  # type: ignore
+                        self.chat_manager.set_active_session(new_project.id, current_session.id, history_to_set)
+
+                    self.event_bus.uiStatusUpdateGlobal.emit(f"Created and switched to project '{new_project.name}'",
+                                                             "#98c379", True, 3000)
+                else:
+                    logger.error(f"Orchestrator: Created project but failed to switch to it: {new_project.id}")
+                    self.event_bus.uiErrorGlobal.emit(f"Created project but failed to switch to it.", False)
+            else:
+                logger.error(f"Orchestrator: Failed to create project '{project_name}'")
+                self.event_bus.uiErrorGlobal.emit(f"Failed to create project '{project_name}'.", False)
+
+        except Exception as e:
+            logger.error(f"Orchestrator: Error creating project '{project_name}': {e}", exc_info=True)
+            self.event_bus.uiErrorGlobal.emit(f"Error creating project: {e}", False)
 
     @Slot(str)
     def _handle_create_new_session_requested(self, project_id: str):
