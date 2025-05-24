@@ -118,6 +118,7 @@ class BackendCoordinator(QObject):
             return False, err_msg, None
 
         request_id = f"llm_req_{uuid.uuid4().hex[:12]}"
+        logger.info(f"BC: Generated request ID: {request_id}")  # DEBUG: Log request ID
         return True, None, request_id # CORRECTED: Changed 'err' to 'None' for successful path
 
     def start_llm_streaming_task(self,
@@ -184,11 +185,17 @@ class BackendCoordinator(QObject):
                 raise AttributeError(f"Adapter '{backend_id}' missing get_response_stream method.")
 
             self._event_bus.llmStreamStarted.emit(request_id)
+            logger.info(f"BC: Started stream for request {request_id}")  # DEBUG
 
             stream_iterator = adapter.get_response_stream(history, options)
+            chunk_count = 0
             async for chunk in stream_iterator:
+                chunk_count += 1
+                logger.debug(f"BC: Emitting chunk #{chunk_count} for {request_id}: '{chunk[:30]}...'")  # DEBUG
                 self._event_bus.llmStreamChunkReceived.emit(request_id, chunk)
                 response_buffer += chunk
+
+            logger.info(f"BC: Stream completed for {request_id}, total chunks: {chunk_count}")  # DEBUG
 
             final_response_text = response_buffer.strip()
             token_usage = adapter.get_last_token_usage()
@@ -200,16 +207,19 @@ class BackendCoordinator(QObject):
             if final_response_text:
                 completed_message = ChatMessage(id=request_id, role=MODEL_ROLE,
                                                 parts=[final_response_text])  # type: ignore
+                logger.info(f"BC: Emitting completion for {request_id}")  # DEBUG
                 self._event_bus.llmResponseCompleted.emit(request_id, completed_message, usage_stats_dict)
             else:
                 empty_msg_text = "[AI returned an empty response]"
                 empty_message = ChatMessage(id=request_id, role=MODEL_ROLE, parts=[empty_msg_text])  # type: ignore
                 self._event_bus.llmResponseCompleted.emit(request_id, empty_message, usage_stats_dict)
         except asyncio.CancelledError:
+            logger.info(f"BC: Stream cancelled for {request_id}")  # DEBUG
             self._event_bus.llmResponseError.emit(request_id, "[AI response cancelled by user]")
         except Exception as e:
             error_msg = adapter.get_last_error() or f"Backend Task Error for ReqID {request_id}: {type(e).__name__}"
             self._last_errors_map[backend_id] = error_msg
+            logger.error(f"BC: Stream error for {request_id}: {error_msg}")  # DEBUG
             self._event_bus.llmResponseError.emit(request_id, error_msg)
         finally:
             self._active_backend_tasks.pop(request_id, None)

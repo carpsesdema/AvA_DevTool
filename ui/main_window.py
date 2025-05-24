@@ -22,7 +22,7 @@ try:
     from ui.chat_input_bar import ChatInputBar
     from utils import constants
     from services.llm_communication_logger import LlmCommunicationLogger
-    from core.chat_message_state_handler import ChatMessageStateHandler  # ADDED: Import ChatMessageStateHandler
+    from core.chat_message_state_handler import ChatMessageStateHandler
 except ImportError as e_main_window:
     logging.basicConfig(level=logging.DEBUG)
     logging.critical(f"CRITICAL IMPORT ERROR in main_window.py: {e_main_window}", exc_info=True)
@@ -56,7 +56,7 @@ class MainWindow(QWidget):
         self.p1_chat_display_area: Optional[ChatDisplayArea] = None
         self.p1_chat_input_bar: Optional[ChatInputBar] = None
         self._llm_comm_logger_instance: Optional[LlmCommunicationLogger] = None
-        self._chat_message_state_handler: Optional[ChatMessageStateHandler] = None  # ADDED: Instance of state handler
+        self._chat_message_state_handler: Optional[ChatMessageStateHandler] = None
 
         if self.chat_manager:
             self._llm_comm_logger_instance = self.chat_manager.get_llm_communication_logger()
@@ -120,7 +120,7 @@ class MainWindow(QWidget):
         right_panel_widget.setMinimumWidth(450)
 
         self.p1_chat_display_area = ChatDisplayArea(parent=right_panel_widget)
-        if self.p1_chat_display_area.chat_item_delegate:  # Set view ref for delegate
+        if self.p1_chat_display_area.chat_item_delegate:
             self.p1_chat_display_area.chat_item_delegate.setView(self.p1_chat_display_area.chat_list_view)
 
         self.p1_chat_input_bar = ChatInputBar(parent=right_panel_widget)
@@ -148,10 +148,10 @@ class MainWindow(QWidget):
         self.setLayout(main_hbox_layout)
 
         # Initialize ChatMessageStateHandler after ChatDisplayArea is ready
-        self._chat_message_state_handler = ChatMessageStateHandler(self._event_bus, parent=self)  # ADDED
+        self._chat_message_state_handler = ChatMessageStateHandler(self._event_bus, parent=self)
         if self.p1_chat_display_area.get_model():
             self._chat_message_state_handler.register_model_for_project(
-                "p1_chat_context", self.p1_chat_display_area.get_model()  # ADDED
+                "p1_chat_context", self.p1_chat_display_area.get_model()
             )
 
     def _apply_styles(self):
@@ -181,6 +181,8 @@ class MainWindow(QWidget):
             return
 
         bus = self._event_bus
+
+        # Input bar sends message
         if self.p1_chat_input_bar:
             self.p1_chat_input_bar.sendMessageRequested.connect(
                 lambda: bus.userMessageSubmitted.emit(
@@ -188,25 +190,36 @@ class MainWindow(QWidget):
                 )
             )
 
+        # Copy text from chat display
         if self.p1_chat_display_area:
             self.p1_chat_display_area.textCopied.connect(
                 lambda text, color: bus.uiTextCopied.emit(text, color)
             )
 
+        # Status and error handling
         bus.uiStatusUpdateGlobal.connect(self.update_status_phase1)
         bus.uiErrorGlobal.connect(self._handle_error_event_phase1)
         bus.uiInputBarBusyStateChanged.connect(self._handle_input_bar_busy_state_change_phase1)
         bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
 
-        # CORRECTED: Direct connections for adding/clearing messages to the display model.
+        # THE ACTUAL FUCKING MESSAGE CONNECTIONS THAT NEED TO WORK:
+        # 1. New messages go to display
         bus.newMessageAddedToHistory.connect(self.p1_chat_display_area.add_message_to_model)
+
+        # 2. Clear messages
         bus.activeSessionHistoryCleared.connect(self.p1_chat_display_area.clear_model_display)
 
-        # These signals are handled by ChatMessageStateHandler which updates the ChatListModel directly.
-        # MainWindow doesn't need to listen to them unless it needs to do something *additional* with the chunks/completion/errors.
-        # bus.llmStreamChunkReceived.connect(self._handle_llm_stream_chunk_event_phase1)
-        # bus.llmResponseCompleted.connect(self._handle_llm_response_completed_event_phase1)
-        # bus.llmResponseError.connect(self._handle_llm_response_error_event_phase1)
+        # 3. THIS IS THE KEY ONE - STREAMING CHUNKS
+        bus.llmStreamChunkReceived.connect(self.p1_chat_display_area.append_chunk_to_message_by_id)
+
+        # 4. Message completion/error
+        bus.llmResponseCompleted.connect(
+            lambda request_id, message, stats: self.p1_chat_display_area.finalize_message_by_id(request_id, message,
+                                                                                                False)
+        )
+        bus.llmResponseError.connect(
+            lambda request_id, error_msg: self.p1_chat_display_area.finalize_message_by_id(request_id, None, True)
+        )
 
         shortcut_escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         shortcut_escape.activated.connect(self._handle_escape_key_pressed_phase1)
@@ -241,18 +254,17 @@ class MainWindow(QWidget):
             self._status_clear_timer.deleteLater()
             self._status_clear_timer = None
 
-        # Refresh status to reflect current backend state
         if self.chat_manager and self.chat_manager.is_api_ready():
             self.update_status_phase1(
                 f"Ready. Using {self.chat_manager.get_model_for_backend(self.chat_manager.get_current_active_chat_backend_id())}",
-                "#98c379", is_temporary=False)  # Not temporary after clearing a temporary message
+                "#98c379", is_temporary=False)
         elif self.chat_manager:
             last_error = self.chat_manager._backend_coordinator.get_last_error_for_backend(
                 self.chat_manager.get_current_active_chat_backend_id()) if self.chat_manager._backend_coordinator else "Unknown"
             self.update_status_phase1(
                 f"Backend not configured: {last_error}", "#FFCC00", is_temporary=False)
         else:
-            self.update_status_phase1("Ready", "#98c379", is_temporary=False)  # Fallback status
+            self.update_status_phase1("Ready", "#98c379", is_temporary=False)
 
     @Slot(str, bool)
     def _handle_error_event_phase1(self, error_message: str, is_critical: bool):
@@ -275,8 +287,6 @@ class MainWindow(QWidget):
         if self.left_panel and self.chat_manager and backend_id == self.chat_manager.get_current_active_chat_backend_id():
             self.left_panel.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
 
-        # Status update triggered by ChatManager's _handle_backend_reconfigured_event, so no explicit call here
-        # just ensuring the UI reflects the current state if needed.
         if is_configured:
             logger.info(f"MW: Backend '{backend_id}' configured. Status updated via ChatManager.")
         else:
@@ -297,7 +307,7 @@ class MainWindow(QWidget):
         details = []
         if self.chat_manager:
             active_backend_id = self.chat_manager.get_current_active_chat_backend_id()
-            model_name = self.chat_manager.get_model_for_backend(active_backend_id)  # This gets the *configured* model
+            model_name = self.chat_manager.get_model_for_backend(active_backend_id)
             if model_name:
                 model_short = model_name.split('/')[-1].split(':')[-1].replace("-latest", "")
                 details.append(f"LLM: {model_short}")

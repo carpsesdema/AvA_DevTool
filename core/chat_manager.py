@@ -195,7 +195,7 @@ class ChatManager(QObject):
             history_to_send=history_for_llm,
             is_modification_response_expected=False,
             options={"temperature": self._active_temperature},
-            request_metadata={"purpose": "p1_normal_chat", "user_query_start": text_stripped[:30]}
+            request_metadata={"purpose": "p1_normal_chat", "user_query_start": text_stripped[:30], "project_id": "p1_chat_context"}  # FIXED: Add project_id
         )
 
     @Slot()
@@ -218,30 +218,31 @@ class ChatManager(QObject):
 
     @Slot(str, str)
     def _handle_llm_stream_chunk(self, request_id: str, chunk_text: str):
-        # The ChatListModel directly connected to BackendCoordinator's llmStreamChunkReceived signal
-        # in MainWindow, which handles appending to message data.
-        # This slot primarily serves as a point for ChatManager to be aware of the stream.
-        pass
+        # FIXED: Actually handle the chunk by logging it
+        if request_id == self._current_llm_request_id:
+            logger.debug(f"CM: Received chunk for {request_id}: '{chunk_text[:50]}...'")
 
-    @Slot(str, ChatMessage, dict)
-    def _handle_llm_response_completed(self, request_id: str, completed_message_obj: ChatMessage,
+    @Slot(str, object, dict)  # FIXED: Changed ChatMessage to object to match signal
+    def _handle_llm_response_completed(self, request_id: str, completed_message_obj: object,
                                        usage_stats_dict: dict):
         if request_id == self._current_llm_request_id:
-            self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE", completed_message_obj.text)
+            # Ensure we have a proper ChatMessage object
+            if isinstance(completed_message_obj, ChatMessage):
+                self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE", completed_message_obj.text)
 
-            # Update the message in the internal history list
-            updated_in_history = False
-            for i, msg in enumerate(self._current_chat_history):
-                if msg.id == request_id:
-                    self._current_chat_history[i] = completed_message_obj  # Replace placeholder with final message
-                    # The completed_message_obj should already have the COMPLETED state from BackendCoordinator,
-                    # but we ensure it here for consistency if necessary.
-                    self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
-                    updated_in_history = True
-                    break
-            if not updated_in_history:
-                # Fallback: If message was somehow not found, append it (shouldn't happen with correct flow)
-                self._current_chat_history.append(completed_message_obj)
+                # Update the message in the internal history list
+                updated_in_history = False
+                for i, msg in enumerate(self._current_chat_history):
+                    if msg.id == request_id:
+                        self._current_chat_history[i] = completed_message_obj  # Replace placeholder with final message
+                        # The completed_message_obj should already have the COMPLETED state from BackendCoordinator,
+                        # but we ensure it here for consistency if necessary.
+                        self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
+                        updated_in_history = True
+                        break
+                if not updated_in_history:
+                    # Fallback: If message was somehow not found, append it (shouldn't happen with correct flow)
+                    self._current_chat_history.append(completed_message_obj)
 
             self._current_llm_request_id = None  # Clear active request ID
             self._event_bus.uiInputBarBusyStateChanged.emit(False)  # Release UI input bar

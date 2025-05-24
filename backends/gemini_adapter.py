@@ -35,16 +35,6 @@ except ImportError:
     logging.getLogger(__name__).warning("GeminiAdapter: google-generativeai library not found.")
 
 logger = logging.getLogger(__name__)
-_SENTINEL_GEMINI = object()
-
-
-def _blocking_next_or_sentinel(iterator: Any) -> Any:
-    try:
-        return next(iterator)
-    except StopIteration:
-        return _SENTINEL_GEMINI
-    except Exception:
-        raise
 
 
 class GeminiAdapter(BackendInterface):
@@ -145,7 +135,6 @@ class GeminiAdapter(BackendInterface):
         effective_generation_config = GenerationConfig(
             **generation_config_dict) if generation_config_dict else None  # type: ignore
 
-        stream_iterator = None
         try:
             def _initiate_stream_call_in_thread():
                 return self._model.generate_content(  # type: ignore
@@ -154,7 +143,66 @@ class GeminiAdapter(BackendInterface):
                     generation_config=effective_generation_config
                 )
 
-            stream_iterator = await asyncio.to_thread(_initiate_stream_call_in_thread)
+            stream_response = await asyncio.to_thread(_initiate_stream_call_in_thread)
+
+            # FIXED: The issue is here - we need to iterate properly
+            async def _process_stream():
+                for chunk in stream_response:
+                    if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback and \
+                            hasattr(chunk.prompt_feedback, 'block_reason') and chunk.prompt_feedback.block_reason:
+                        err_msg = f"Content blocked (prompt feedback): {chunk.prompt_feedback.block_reason}."
+                        self._last_error = err_msg
+                        yield f"[SYSTEM ERROR: {err_msg}]"
+                        return
+
+                    if hasattr(chunk, 'candidates') and chunk.candidates:
+                        for candidate in chunk.candidates:
+                            if hasattr(candidate, 'finish_reason') and candidate.finish_reason and \
+                                    candidate.finish_reason.name not in ["STOP", "MAX_TOKENS", "UNSPECIFIED", "NULL"]:
+                                err_msg = f"Generation stopped. Reason: {candidate.finish_reason.name}."
+                                if hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
+                                    err_msg += f" Details: {candidate.safety_ratings}"
+                                self._last_error = err_msg
+                                yield f"[SYSTEM ERROR: {err_msg}]"
+                                return
+
+                    text_parts_from_chunk = []
+                    if hasattr(chunk, 'parts') and chunk.parts:
+                        for part in chunk.parts:
+                            if hasattr(part, 'text') and part.text is not None:
+                                text_parts_from_chunk.append(part.text)
+                    elif hasattr(chunk, 'text') and chunk.text is not None:
+                        text_parts_from_chunk.append(chunk.text)
+                    elif hasattr(chunk, 'candidates') and chunk.candidates:
+                        for cand in chunk.candidates:
+                            if hasattr(cand, 'content') and cand.content and \
+                                    hasattr(cand.content, 'parts') and cand.content.parts:
+                                for part in cand.content.parts:
+                                    if hasattr(part, 'text') and part.text is not None:
+                                        text_parts_from_chunk.append(part.text)
+
+                    if text_parts_from_chunk:
+                        yield "".join(text_parts_from_chunk)
+
+            # Process the stream in a thread
+            async for chunk_text in _process_stream():
+                yield chunk_text
+
+            # Get usage stats from the final response
+            if hasattr(stream_response, 'usage_metadata') and stream_response.usage_metadata:
+                usage_sdk = stream_response.usage_metadata
+                self._last_prompt_tokens = getattr(usage_sdk, 'prompt_token_count', None)
+                completion_val = getattr(usage_sdk, 'candidates_token_count', None)
+                if completion_val is None and hasattr(usage_sdk, 'result'):
+                    res_obj = getattr(usage_sdk, 'result', {})
+                    if isinstance(res_obj, dict):
+                        completion_val = res_obj.get('candidates_token_count', None)
+                if completion_val is None and hasattr(usage_sdk,
+                                                      'total_token_count') and self._last_prompt_tokens is not None:
+                    self._last_completion_tokens = usage_sdk.total_token_count - self._last_prompt_tokens
+                else:
+                    self._last_completion_tokens = completion_val
+
         except BlockedPromptException as bpe:  # type: ignore
             self._last_error = f"API Error: Prompt blocked. {bpe.args}"
             raise RuntimeError(self._last_error) from bpe
@@ -165,71 +213,8 @@ class GeminiAdapter(BackendInterface):
             self._last_error = f"API Error (Permission Denied): {pde}."
             raise RuntimeError(self._last_error) from pde
         except Exception as e_init_stream:
-            self._last_error = f"Error initiating Gemini stream: {type(e_init_stream).__name__} - {e_init_stream}"
+            self._last_error = f"Error during Gemini stream: {type(e_init_stream).__name__} - {e_init_stream}"
             raise RuntimeError(self._last_error) from e_init_stream
-
-        try:
-            # CORRECTED: Removed 'qasync.iter_sync' which caused AttributeError
-            # Reverted to original method of consuming synchronous iterator via asyncio.to_thread
-            while True:
-                chunk = await asyncio.to_thread(_blocking_next_or_sentinel, stream_iterator)
-                if chunk is _SENTINEL_GEMINI: break
-
-                if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback and \
-                        hasattr(chunk.prompt_feedback, 'block_reason') and chunk.prompt_feedback.block_reason:
-                    err_msg = f"Content blocked (prompt feedback): {chunk.prompt_feedback.block_reason}."
-                    self._last_error = err_msg
-                    yield f"[SYSTEM ERROR: {err_msg}]";
-                    return
-
-                if hasattr(chunk, 'candidates') and chunk.candidates:
-                    for candidate in chunk.candidates:
-                        if hasattr(candidate, 'finish_reason') and candidate.finish_reason and \
-                                candidate.finish_reason.name not in ["STOP", "MAX_TOKENS", "UNSPECIFIED", "NULL"]:
-                            err_msg = f"Generation stopped. Reason: {candidate.finish_reason.name}."
-                            if hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
-                                err_msg += f" Details: {candidate.safety_ratings}"
-                            self._last_error = err_msg
-                            yield f"[SYSTEM ERROR: {err_msg}]";
-                            return
-
-                text_parts_from_chunk = []
-                if hasattr(chunk, 'parts') and chunk.parts:
-                    for part in chunk.parts:
-                        if hasattr(part, 'text') and part.text is not None: text_parts_from_chunk.append(part.text)
-                elif hasattr(chunk, 'text') and chunk.text is not None:
-                    text_parts_from_chunk.append(chunk.text)
-                elif hasattr(chunk, 'candidates') and chunk.candidates:
-                    for cand in chunk.candidates:
-                        if hasattr(cand, 'content') and cand.content and \
-                                hasattr(cand.content, 'parts') and cand.content.parts:
-                            for part in cand.content.parts:
-                                if hasattr(part, 'text') and part.text is not None:
-                                    text_parts_from_chunk.append(part.text)
-                if text_parts_from_chunk:
-                    yield "".join(text_parts_from_chunk)
-
-        except StopCandidateException as sce:  # type: ignore
-            self._last_error = f"API Error: Candidate generation stopped. {sce.args}"
-            yield f"[SYSTEM ERROR: Candidate stopped - {sce.args}]";
-            return
-        except Exception as e_stream_iter:
-            if not self._last_error:
-                self._last_error = f"Error during Gemini stream: {type(e_stream_iter).__name__} - {e_stream_iter}"
-            raise RuntimeError(self._last_error) from e_stream_iter
-        finally:
-            if stream_iterator and hasattr(stream_iterator, 'usage_metadata') and stream_iterator.usage_metadata:
-                usage_sdk = stream_iterator.usage_metadata
-                self._last_prompt_tokens = getattr(usage_sdk, 'prompt_token_count', None)
-                completion_val = getattr(usage_sdk, 'candidates_token_count', None)
-                if completion_val is None and hasattr(usage_sdk, 'result'):
-                    res_obj = getattr(usage_sdk, 'result', {})
-                    if isinstance(res_obj, dict): completion_val = res_obj.get('candidates_token_count', None)
-                if completion_val is None and hasattr(usage_sdk,
-                                                      'total_token_count') and self._last_prompt_tokens is not None:
-                    self._last_completion_tokens = usage_sdk.total_token_count - self._last_prompt_tokens
-                else:
-                    self._last_completion_tokens = completion_val
 
     def _format_history_for_api(self, history: List[ChatMessage]) -> List[Dict[str, Any]]:  # type: ignore
         gemini_history = []
@@ -279,7 +264,6 @@ class GeminiAdapter(BackendInterface):
 
         if self._model_name and self._is_configured and self._model_name not in final_model_list:
             final_model_list.insert(0, self._model_name)
-            # Re-sort if current model was added
             final_model_list.sort(key=lambda x: (0 if "latest" in x.lower() else 1,
                                                  0 if "1.5-pro" in x.lower() else 1 if "gemini-pro" in x.lower() and "1.0" not in x.lower() else 2 if "1.5-flash" in x.lower() else 3 if "1.0-pro" in x.lower() else 4,
                                                  x.lower()))

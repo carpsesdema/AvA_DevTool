@@ -174,9 +174,10 @@ async def async_main():
         session_service_p1 = P1SessionService()
         upload_service_p1 = P1UploadService()
 
+        # FIXED: Use positional arguments instead of keyword arguments
         app_orchestrator = ApplicationOrchestrator(
-            session_service_placeholder=session_service_p1,  # CORRECTED LINE
-            upload_service_placeholder=upload_service_p1    # CORRECTED LINE
+            session_service_p1,  # First positional argument
+            upload_service_p1    # Second positional argument
         )
         logger.info("ApplicationOrchestrator instantiated.")
 

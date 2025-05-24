@@ -74,8 +74,9 @@ class ChatDisplayArea(QWidget):
     def _handle_rows_inserted(self, parent: QModelIndex, first: int, last: int):
         self._scroll_to_bottom()
 
-    @Slot(ChatMessage)  # type: ignore
-    def add_message_to_model(self, message: ChatMessage):  # type: ignore
+    @Slot(str, object)  # FIXED: Accept both project_id and message
+    def add_message_to_model(self, project_id: str, message: ChatMessage):  # FIXED: Accept both parameters
+        """Add a message to the chat model. The project_id is ignored in Phase 1."""
         if self.chat_list_model:
             self.chat_list_model.addMessage(message)
 
@@ -88,22 +89,23 @@ class ChatDisplayArea(QWidget):
                 if v_scrollbar and v_scrollbar.value() >= v_scrollbar.maximum() - (v_scrollbar.pageStep() // 2):
                     self._scroll_to_bottom()
 
-    @Slot(str, ChatMessage, bool)  # type: ignore
+    @Slot(str, object, bool)  # FIXED: Update slot signature to match actual usage
     def finalize_message_by_id(self, request_id: str, final_message_obj: Optional[ChatMessage] = None,
                                is_error: bool = False):  # type: ignore
         if self.chat_list_model:
             self.chat_list_model.finalize_message_by_id(request_id, final_message_obj, is_error)
             self._scroll_to_bottom()
 
+    @Slot(str)  # FIXED: Accept project_id parameter
+    def clear_model_display(self, project_id: str = None):
+        """Clear the chat model display. The project_id is ignored in Phase 1."""
+        if self.chat_list_model:
+            self.chat_list_model.clearMessages()
+
     @Slot(list)
     def load_history_into_model(self, history: List[ChatMessage]):  # type: ignore
         if self.chat_list_model:
             self.chat_list_model.loadHistory(history)
-
-    @Slot()
-    def clear_model_display(self):
-        if self.chat_list_model:
-            self.chat_list_model.clearMessages()
 
     def _scroll_to_bottom(self):
         if self.chat_list_view and self.chat_list_model and self.chat_list_model.rowCount() > 0:
