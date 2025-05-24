@@ -1,31 +1,31 @@
 /****************************************************************************
- * style.qss - Main Stylesheet for AvA PySide6 Rebuild (Phase 1)
+ * style.qss - "Code Green" & Deep Space Theme for AvA PySide6 Rebuild
  ****************************************************************************/
 
 QWidget {
-    background-color: #282c34; /* Dark background */
-    color: #abb2bf; /* Light grey text */
+    background-color: #0F101A; /* Deep space void background */
+    color: #A0D0A0; /* Light gray-green text */
     font-family: "Segoe UI Variable Text", "Segoe UI", "Noto Sans", sans-serif;
     font-size: 10pt;
     border: none;
 }
 
 QMainWindow, QDialog {
-    background-color: #282c34;
+    background-color: #0F101A;
 }
 
 /* === LeftControlPanel Specifics === */
 LeftControlPanel, #LeftControlPanel {
-    background-color: #21252b; /* Slightly darker for the panel */
-    border-right: 1px solid #1c1e24;
+    background-color: #121212; /* Slightly lighter void for panel */
+    border-right: 1px solid #2E4030;
 }
 
 QGroupBox {
-    background-color: transparent; /* Make groupbox background transparent */
-    border: 1px solid #3e4451;
+    background-color: transparent;
+    border: 1px solid #2E4030; /* Dark muted green border */
     border-radius: 5px;
-    margin-top: 1ex; /* Space for title */
-    padding-top: 1ex; /* Ensure content is below title */
+    margin-top: 1ex;
+    padding-top: 1ex;
     font-weight: bold;
 }
 
@@ -33,62 +33,65 @@ QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
     padding: 0 5px 0 5px;
-    color: #98c379; /* Greenish title */
-    background-color: #21252b; /* Match panel background */
-    border-radius: 3px; /* Rounded corners for the title background */
-    margin-left: 5px; /* Offset from the left edge of the groupbox border */
+    color: #39FF14; /* Bright terminal green title */
+    background-color: #121212;
+    border-radius: 3px;
+    margin-left: 5px;
 }
-
 
 /* === Buttons === */
 QPushButton {
-    background-color: #3e4451; /* Darker button */
-    color: #dcdcdc; /* Lighter text for buttons */
-    border: 1px solid #4f5356;
+    background-color: #2E4030; /* Dark muted green background */
+    color: #E0E0E0; /* Off-white text for buttons */
+    border: 1px solid #39FF14; /* Terminal green border */
     border-radius: 4px;
     padding: 6px 10px;
-    min-height: 18px; /* Ensure buttons have some height */
-    text-align: center; /* Default center alignment */
+    min-height: 18px;
+    text-align: center;
 }
 
 QPushButton:hover {
-    background-color: #4f5356; /* Slightly lighter on hover */
-    border-color: #61afef; /* Blueish border on hover */
+    background-color: #39FF14; /* Bright green on hover */
+    color: #0F101A; /* Dark text on bright background */
+    border-color: #4CAF50;
 }
 
 QPushButton:pressed {
-    background-color: #2c313a; /* Darker when pressed */
+    background-color: #4CAF50; /* Slightly softer green when pressed */
+    color: #0F101A;
 }
 
 QPushButton:disabled {
-    background-color: #2a2e37;
-    color: #6a737d;
-    border-color: #3a3f4b;
+    background-color: #1A1A1A;
+    color: #555555;
+    border-color: #333333;
 }
 
-/* Specific styles for LeftPanel buttons if needed */
+/* Specific styles for LeftPanel buttons */
 LeftControlPanel QPushButton, #LeftPanel QPushButton {
-    text-align: left; /* Override for left panel buttons */
-    padding: 7px 10px; /* Consistent padding */
-}
-LeftControlPanel QPushButton:hover, #LeftPanel QPushButton:hover {
-    background-color: #4f5356;
-    border-left: 2px solid #61afef; /* Indicator on hover */
+    text-align: left;
+    padding: 7px 10px;
 }
 
+LeftControlPanel QPushButton:hover, #LeftPanel QPushButton:hover {
+    background-color: #39FF14;
+    color: #0F101A;
+    border-left: 3px solid #4CAF50; /* Thicker left indicator */
+}
 
 /* === ComboBoxes (Dropdowns) === */
 QComboBox {
-    background-color: #3e4451;
-    border: 1px solid #4f5356;
+    background-color: #2E4030;
+    border: 1px solid #39FF14;
     border-radius: 4px;
     padding: 4px 8px;
     min-height: 20px;
-    color: #dcdcdc;
+    color: #E0E0E0;
 }
 
 QComboBox:hover {
-    border-color: #61afef;
+    border-color: #4CAF50;
+    background-color: #3A5040;
 }
 
 QComboBox::drop-down {
@@ -96,212 +99,219 @@ QComboBox::drop-down {
     subcontrol-position: top right;
     width: 20px;
     border-left-width: 1px;
-    border-left-color: #4f5356;
+    border-left-color: #39FF14;
     border-left-style: solid;
     border-top-right-radius: 3px;
     border-bottom-right-radius: 3px;
-    background-color: #3e4451;
+    background-color: #2E4030;
 }
 
 QComboBox::down-arrow {
-    /* image: url(assets/dropdown_arrow.svg); */ /* CORRECTED: Commented out this line to remove missing file warning */
     width: 10px;
     height: 10px;
 }
-QComboBox::down-arrow:on { /* when the popup is open */
-    /* top: 1px; left: 1px; */ /* Slight shift for pressed look */
-}
 
-QComboBox QAbstractItemView { /* The dropdown list itself */
-    background-color: #2c313a; /* Darker background for the list */
-    border: 1px solid #4f5356;
-    selection-background-color: #61afef; /* Blueish selection */
-    selection-color: #ffffff;
-    color: #dcdcdc;
+QComboBox QAbstractItemView {
+    background-color: #121212; /* Darker background for dropdown list */
+    border: 1px solid #39FF14;
+    selection-background-color: #39FF14; /* Terminal green selection */
+    selection-color: #0F101A; /* Dark text on green selection */
+    color: #A0D0A0;
     padding: 2px;
 }
 
-/* === QTextEdit (like for Personality Dialog) === */
+/* === Text Input Fields === */
 QTextEdit {
-    background-color: #2c313a; /* Dark input field background */
-    color: #dcdcdc;
-    border: 1px solid #4f5356;
+    background-color: #121212; /* Dark space background */
+    color: #E0E0E0;
+    border: 1px solid #2E4030;
     border-radius: 4px;
     padding: 5px;
 }
 
 QTextEdit:focus {
-    border-color: #61afef; /* Blueish border on focus */
+    border-color: #39FF14; /* Terminal green focus */
+    background-color: #0F101A;
 }
 
-/* === QLineEdit (like for New Project Dialog) === */
 QLineEdit {
-    background-color: #2c313a;
-    color: #dcdcdc;
-    border: 1px solid #4f5356;
+    background-color: #121212;
+    color: #E0E0E0;
+    border: 1px solid #2E4030;
     border-radius: 4px;
     padding: 5px;
     min-height: 18px;
 }
 
 QLineEdit:focus {
-    border-color: #61afef;
+    border-color: #39FF14;
+    background-color: #0F101A;
 }
 
-
-/* === Chat Specific (Phase 1 single view) === */
-/* ChatInputBar and ChatDisplayArea are QWidgets, so they inherit base QWidget style */
-/* Specific styling for their children: */
-
-MultilineInputWidget #UserInputTextEdit { /* QTextEdit within MultilineInputWidget */
-    background-color: #2c313a;
-    color: #dcdcdc;
-    border: 1px solid #3e4451; /* Slightly softer border */
+/* === Chat Specific Styling === */
+MultilineInputWidget #UserInputTextEdit {
+    background-color: #121212;
+    color: #A0D0A0; /* Light gray-green for user input */
+    border: 1px solid #2E4030;
     border-radius: 4px;
     padding: 6px;
 }
+
 MultilineInputWidget #UserInputTextEdit:focus {
-    border-color: #61afef;
+    border-color: #39FF14;
+    background-color: #0F101A;
 }
 
 ChatInputBar #SendButton {
-    background-color: #61afef; /* Blue send button */
-    color: #ffffff;
+    background-color: #39FF14; /* Bright terminal green send button */
+    color: #0F101A; /* Dark text on bright background */
     font-weight: bold;
     padding: 6px 12px;
+    border: 1px solid #4CAF50;
 }
+
 ChatInputBar #SendButton:hover {
-    background-color: #79c6ff;
+    background-color: #4CAF50;
+    color: #0F101A;
 }
+
 ChatInputBar #SendButton:pressed {
-    background-color: #4a8dc4;
+    background-color: #2E7D32;
+    color: #E0E0E0;
 }
+
 ChatInputBar #SendButton:disabled {
-    background-color: #3a3f4b;
-    color: #777777;
+    background-color: #1A1A1A;
+    color: #555555;
+    border-color: #333333;
 }
 
-ChatInputBar #AttachButton { /* If you add an attach button */
-    background-color: #3e4451;
-    border: 1px solid #4f5356;
-    /* icon styling might be needed if using SVG */
+ChatInputBar #AttachButton {
+    background-color: #2E4030;
+    border: 1px solid #39FF14;
 }
+
 ChatInputBar #AttachButton:hover {
-    background-color: #4f5356;
+    background-color: #39FF14;
+    color: #0F101A;
 }
 
-
-/* ChatDisplayArea and its ListView */
+/* ChatDisplayArea */
 ChatDisplayAreaWidget #ChatListView_Phase1 {
-    background-color: #282c34; /* Match main background */
-    border: none; /* No border for the list view itself */
+    background-color: #0F101A; /* Deep void background for chat */
+    border: none;
 }
-
 
 /* === ScrollBars === */
 QScrollBar:vertical {
-    border: 1px solid #21252b;
-    background: #21252b;
+    border: 1px solid #2E4030;
+    background: #121212;
     width: 12px;
     margin: 12px 0 12px 0;
 }
+
 QScrollBar::handle:vertical {
-    background: #4f5356;
+    background: #2E4030;
     min-height: 20px;
     border-radius: 6px;
 }
+
 QScrollBar::handle:vertical:hover {
-    background: #61afef;
+    background: #39FF14;
 }
+
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     border: none;
     background: none;
     height: 12px;
-    subcontrol-position: top;
-    subcontrol-origin: margin;
 }
+
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: none;
 }
 
 QScrollBar:horizontal {
-    border: 1px solid #21252b;
-    background: #21252b;
+    border: 1px solid #2E4030;
+    background: #121212;
     height: 12px;
     margin: 0 12px 0 12px;
 }
+
 QScrollBar::handle:horizontal {
-    background: #4f5356;
+    background: #2E4030;
     min-width: 20px;
     border-radius: 6px;
 }
+
 QScrollBar::handle:horizontal:hover {
-    background: #61afef;
-}
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    border: none;
-    background: none;
-    width: 12px;
-    subcontrol-position: left;
-    subcontrol-origin: margin;
-}
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-    background: none;
+    background: #39FF14;
 }
 
-/* === QLabel === */
+/* === Labels === */
 QLabel {
-    background-color: transparent; /* Labels should generally be transparent */
-    color: #abb2bf; /* Default text color */
+    background-color: transparent;
+    color: #A0D0A0; /* Light gray-green */
 }
 
-QLabel#StatusLabel { /* Specific for your status bar label */
-    color: #98c379; /* Greenish for positive status, will be overridden */
+QLabel#StatusLabel {
+    color: #39FF14; /* Terminal green for status */
     padding: 2px 5px;
 }
 
-/* === QSplitter === */
+QLabel#RagStatusLabel {
+    color: #A0D0A0; /* Default light gray-green */
+}
+
+/* === Splitter === */
 QSplitter::handle {
-    background-color: #3e4451; /* Color of the splitter handle */
-    /* image: url(assets/splitter_handle.svg);  You can use an image */
-    height: 1px; /* For horizontal splitter, width for vertical */
+    background-color: #2E4030;
+    height: 1px;
 }
+
 QSplitter::handle:hover {
-    background-color: #61afef;
+    background-color: #39FF14;
 }
+
 QSplitter::handle:pressed {
-    background-color: #4a8dc4;
+    background-color: #4CAF50;
 }
 
 /* === Tooltips === */
 QToolTip {
-    background-color: #1e1e1e; /* Very dark background */
-    color: #dcdcdc; /* Light text */
-    border: 1px solid #3e4451;
+    background-color: #121212; /* Dark space background */
+    color: #E0E0E0; /* Off-white text */
+    border: 1px solid #39FF14; /* Terminal green border */
     padding: 4px;
     border-radius: 3px;
-    opacity: 230; /* Slightly transparent */
+    opacity: 230;
 }
 
-/* === Dialog Specifics (if needed beyond QDialog base) === */
-EditPersonalityDialog #PersonalityPromptEdit { /* QTextEdit in EditPersonalityDialog */
-    font-size: 9.5pt; /* Slightly smaller if desired for this specific edit */
+/* === Dialog Specifics === */
+EditPersonalityDialog #PersonalityPromptEdit {
+    font-size: 9.5pt;
+    background-color: #121212;
+    color: #A0D0A0;
+    border: 1px solid #2E4030;
 }
 
-LlmTerminalWindow #LlmLogTextEdit { /* QTextEdit in LlmTerminalWindow */
-    background-color: #1e1e1e; /* Darker for log view */
-    color: #dcdcdc;
-    font-family: "JetBrains Mono", "Consolas", "Courier New", monospace; /* Monospaced for logs */
+EditPersonalityDialog #PersonalityPromptEdit:focus {
+    border-color: #39FF14;
+}
+
+LlmTerminalWindow #LlmLogTextEdit {
+    background-color: #0F101A; /* Deep void for terminal */
+    color: #A0D0A0; /* Light gray-green terminal text */
+    font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
     font-size: 9pt;
-    border: 1px solid #333;
+    border: 1px solid #2E4030;
 }
 
-/* Add styles for QTreeView in LeftPanel if you get to it in P1 */
+/* === Tree Views === */
 LeftControlPanel #ProjectTreeView {
-    background-color: #2c313a;
-    color: #abb2bf;
-    border: 1px solid #3e4451;
-    alternate-background-color: #32363e; /* For alternating row colors */
+    background-color: #121212;
+    color: #A0D0A0;
+    border: 1px solid #2E4030;
+    alternate-background-color: #1A1A1A;
 }
 
 LeftControlPanel #ProjectTreeView::item {
@@ -310,56 +320,74 @@ LeftControlPanel #ProjectTreeView::item {
 }
 
 LeftControlPanel #ProjectTreeView::item:selected {
-    background-color: #61afef; /* Blueish selection */
-    color: #ffffff;
+    background-color: #39FF14; /* Terminal green selection */
+    color: #0F101A; /* Dark text on bright selection */
 }
 
 LeftControlPanel #ProjectTreeView::item:hover {
-    background-color: #3e4451;
+    background-color: #2E4030;
 }
 
-/* For Phase 1, QTabWidget is not heavily used, but basic styling */
+/* === List Widgets === */
+QListWidget {
+    background-color: #121212;
+    color: #A0D0A0;
+    border: 1px solid #2E4030;
+    border-radius: 4px;
+    alternate-background-color: #1A1A1A;
+}
+
+QListWidget::item {
+    padding: 4px;
+    border-radius: 3px;
+    margin: 1px;
+}
+
+QListWidget::item:selected {
+    background-color: #39FF14;
+    color: #0F101A;
+}
+
+QListWidget::item:hover {
+    background-color: #2E4030;
+}
+
+/* === Tab Widgets === */
 QTabWidget::pane {
-    border: 1px solid #3e4451;
-    border-top: none; /* Pane border often looks better without top if tabs are on top */
-    background-color: #282c34; /* Match main background */
+    border: 1px solid #2E4030;
+    border-top: none;
+    background-color: #0F101A;
 }
 
 QTabBar::tab {
-    background-color: #3e4451;
-    color: #abb2bf;
-    border: 1px solid #2c313a;
-    border-bottom: none; /* For tabs on top */
+    background-color: #2E4030;
+    color: #A0D0A0;
+    border: 1px solid #39FF14;
+    border-bottom: none;
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
     padding: 6px 10px;
-    margin-right: 1px; /* Spacing between tabs */
+    margin-right: 1px;
     min-width: 80px;
 }
 
 QTabBar::tab:selected {
-    background-color: #282c34; /* Match pane background for selected tab */
-    color: #ffffff; /* Brighter text for selected tab */
-    border-color: #3e4451;
-    /* border-bottom-color: #282c34; /* Make bottom border blend with pane */
+    background-color: #39FF14;
+    color: #0F101A;
+    border-color: #4CAF50;
 }
 
 QTabBar::tab:hover:!selected {
-    background-color: #4f5356;
+    background-color: #3A5040;
 }
 
 QTabBar::close-button {
-    /* image: url(assets/close_tab_icon.svg); /* You'll need an icon */
-    /* subcontrol-position: right; */
-    /* subcontrol-origin: padding; */
     border: none;
     background: transparent;
     border-radius: 2px;
     padding: 2px;
 }
+
 QTabBar::close-button:hover {
-    background-color: #61afef;
-}
-QTabBar::close-button:pressed {
-    background-color: #4a8dc4;
+    background-color: #39FF14;
 }

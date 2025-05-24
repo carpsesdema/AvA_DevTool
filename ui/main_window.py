@@ -72,7 +72,7 @@ class MainWindow(QWidget):
         self._init_ui()
         self._apply_styles()
         self._connect_signals_and_event_bus()
-        self._connect_project_manager_signals_to_ui()  # ADDED
+        self._connect_project_manager_signals_to_ui()  # MODIFIED
         self._setup_window_properties()
         logger.info("MainWindow initialized successfully.")
 
@@ -213,28 +213,20 @@ class MainWindow(QWidget):
         shortcut_escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         shortcut_escape.activated.connect(self._handle_escape_key_pressed)
 
-    def _connect_project_manager_signals_to_ui(self):  # NEW Method
-        if not self._project_manager or not self.left_panel:
-            logger.warning("MW: ProjectManager or LeftPanel not available for signal connection.")
+    def _connect_project_manager_signals_to_ui(self):  # MODIFIED Method
+        if not self._project_manager:
+            logger.warning("MW: ProjectManager not available for signal connection.")
             return
 
-        logger.debug("MW: Connecting ProjectManager signals to LeftPanel UI update slots.")
+        logger.debug("MW: Connecting ProjectManager signals for MainWindow specific UI updates.")
 
-        # These signals are emitted by ProjectManager and will update LeftPanel's lists
-        self._project_manager.projectsLoaded.connect(self.left_panel.populate_projects_list)
-        self._project_manager.projectCreated.connect(
-            self.left_panel._handle_project_created)  # Uses PM.get_project_by_id
-        self._project_manager.sessionCreated.connect(
-            self.left_panel._handle_session_created)  # Uses PM.get_session_by_id
-
-        # These signals indicate a change in current project/session.
-        # LeftPanel also has slots to react to these by re-selecting items in its lists.
-        self._project_manager.projectSwitched.connect(self.left_panel._handle_project_switched)
-        self._project_manager.sessionSwitched.connect(self.left_panel._handle_session_switched)
-
-        # Also connect ProjectManager's projectSwitched and sessionSwitched to MainWindow's title update
+        # MainWindow specific UI updates (e.g., window title)
         self._project_manager.projectSwitched.connect(self._handle_project_switched_ui_update)
         self._project_manager.sessionSwitched.connect(self._handle_session_switched_ui_update)
+
+        # LeftPanel handles its own list updates by connecting to ProjectManager signals directly.
+        # Therefore, connections from MainWindow to LeftPanel's update slots for these signals
+        # are removed from here to avoid duplication.
 
     @Slot(str, str)
     def _handle_code_file_update_event(self, filename: str, content: str):
@@ -464,4 +456,4 @@ class MainWindow(QWidget):
 
         QTimer.singleShot(150, self._clear_temporary_status)
         self.update_window_title()
-        self.update_window_title()
+        # self.update_window_title() # Duplicate call removed
