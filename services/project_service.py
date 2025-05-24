@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import shutil  # Added for file backup and removal
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -11,11 +12,13 @@ from PySide6.QtCore import QObject, Signal
 
 try:
     from core.models import ChatMessage
+    from core.message_enums import MessageLoadingState  # Added import for enum handling
     from utils import constants
 except ImportError as e:
     logging.getLogger(__name__).critical(f"Critical import error in ProjectService: {e}", exc_info=True)
     # Fallback for type hinting if ChatMessage is not available at this point
     ChatMessage = type("ChatMessage", (object,), {})  # type: ignore
+    MessageLoadingState = type("MessageLoadingState", (object,), {})  # type: ignore
     raise
 
 logger = logging.getLogger(__name__)
@@ -48,8 +51,24 @@ class ChatSession:
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         # Ensure ChatMessage objects are correctly serialized
-        data['message_history'] = [msg.to_dict() if hasattr(msg, 'to_dict') else asdict(msg) for msg in
-                                   self.message_history]
+        message_history_serialized = []
+        for msg in self.message_history:
+            msg_dict = msg.to_dict() if hasattr(msg, 'to_dict') else asdict(msg)
+
+            # Fix for MessageLoadingState serialization
+            if 'loading_state' in msg_dict:
+                # Convert enum to string representation
+                if hasattr(msg_dict['loading_state'], 'name'):
+                    msg_dict['loading_state'] = msg_dict['loading_state'].name
+                elif hasattr(msg_dict['loading_state'], 'value'):
+                    msg_dict['loading_state'] = msg_dict['loading_state'].value
+                # If it's not an expected type, just convert to string
+                elif msg_dict['loading_state'] is not None:
+                    msg_dict['loading_state'] = str(msg_dict['loading_state'])
+
+            message_history_serialized.append(msg_dict)
+
+        data['message_history'] = message_history_serialized
         return data
 
     @classmethod
@@ -61,6 +80,15 @@ class ChatSession:
                 messages.append(msg_data)
             elif isinstance(msg_data, dict):
                 try:
+                    # Convert string loading_state back to enum if needed
+                    if 'loading_state' in msg_data and isinstance(msg_data['loading_state'], str):
+                        try:
+                            from core.message_enums import MessageLoadingState
+                            msg_data['loading_state'] = MessageLoadingState[msg_data['loading_state']]
+                        except (KeyError, ImportError):
+                            # If enum can't be restored, remove it to use default
+                            msg_data.pop('loading_state', None)
+
                     # Assuming ChatMessage can be initialized from a dict (e.g., via **kwargs in its __init__)
                     messages.append(ChatMessage(**msg_data))  # type: ignore
                 except Exception as e_msg_create:
@@ -234,6 +262,21 @@ class ProjectManager(QObject):
             with open(session_file, 'r', encoding='utf-8') as f:
                 session_data = json.load(f)
             return ChatSession.from_dict(session_data)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to load session {session_id} from {session_file}: JSON Error: {e}")
+            # Attempt to repair or delete the corrupted file
+            try:
+                # Backup corrupted file
+                backup_file = f"{session_file}.corrupted"
+                shutil.copy2(session_file, backup_file)
+                logger.warning(f"Backed up corrupted session file to {backup_file}")
+
+                # Optionally, remove the corrupted file to prevent future errors
+                os.remove(session_file)
+                logger.warning(f"Removed corrupted session file: {session_file}")
+            except Exception as backup_error:
+                logger.error(f"Failed to backup/remove corrupted session file: {backup_error}")
+            return None
         except Exception as e:
             logger.error(f"Failed to load session {session_id} from {session_file}: {e}")
             return None
@@ -290,14 +333,27 @@ class ProjectManager(QObject):
         sessions_dir = os.path.join(self.projects_dir, project_id, "sessions")
         if not os.path.exists(sessions_dir): return []
         sessions = []
+        # Track session IDs we've already added
+        session_ids_seen = set()
+
         for filename in os.listdir(sessions_dir):
             if filename.endswith('.json'):
                 session_id = filename[:-5]
+
+                # Skip if we've already processed this session ID
+                if session_id in session_ids_seen:
+                    continue
+                session_ids_seen.add(session_id)
+
                 session = self._sessions_cache.get(session_id)
                 if not session:
                     loaded_s = self._load_session(project_id, session_id)
-                    if loaded_s: self._sessions_cache[session_id] = loaded_s; session = loaded_s
-                if session: sessions.append(session)
+                    if loaded_s:
+                        self._sessions_cache[session_id] = loaded_s
+                        session = loaded_s
+                if session:
+                    sessions.append(session)
+
         sessions.sort(key=lambda s: s.created_at if s.created_at else "")
         return sessions
 
@@ -335,7 +391,8 @@ class ProjectManager(QObject):
             self.projectDeleted.emit(project_id)
             return True
         except Exception as e:
-            logger.error(f"Error deleting project {project_id}: {e}"); return False
+            logger.error(f"Error deleting project {project_id}: {e}");
+            return False
 
     def delete_session(self, project_id: str, session_id: str,
                        emit_project_deleted: bool = True):  # Parameter 'emit_project_deleted' seems unused
@@ -351,5 +408,6 @@ class ProjectManager(QObject):
                     if self._current_session and self._current_session.id == session_id: self._current_session = None
                 return True
             except Exception as e:
-                logger.error(f"Error deleting session file {session_file}: {e}"); return False
+                logger.error(f"Error deleting session file {session_file}: {e}");
+                return False
         return False
