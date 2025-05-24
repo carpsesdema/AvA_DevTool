@@ -1,3 +1,4 @@
+# ui/dialog_service.py
 import logging
 from typing import Optional
 
@@ -9,6 +10,7 @@ try:
     from core.chat_manager import ChatManager
     from ui.dialogs.llm_terminal_window import LlmTerminalWindow
     from ui.dialogs.personality_dialog import EditPersonalityDialog
+    from ui.dialogs.code_viewer_dialog import CodeViewerWindow
 except ImportError as e_ds:
     logging.getLogger(__name__).critical(f"Critical import error in DialogService: {e_ds}", exc_info=True)
     raise
@@ -32,6 +34,7 @@ class DialogService(QObject):
         self._event_bus = event_bus
 
         self._llm_terminal_window: Optional[LlmTerminalWindow] = None
+        self._code_viewer_window: Optional[CodeViewerWindow] = None
 
         self._connect_event_bus_subscriptions_phase1()
         logger.info("DialogService (Phase 1) initialized and connected to EventBus.")
@@ -40,14 +43,22 @@ class DialogService(QObject):
         bus = self._event_bus
         bus.showLlmLogWindowRequested.connect(self.show_llm_terminal_window)
         bus.chatLlmPersonalityEditRequested.connect(self.trigger_edit_personality_dialog)
+        bus.viewCodeViewerRequested.connect(lambda: self.show_code_viewer(ensure_creation=True))
 
-    @Slot()
     def show_llm_terminal_window(self, ensure_creation: bool = True) -> Optional[LlmTerminalWindow]:
         logger.debug(f"DialogService: Request to show LLM terminal window (ensure_creation={ensure_creation}).")
         try:
             if self._llm_terminal_window is None and ensure_creation:
                 self._llm_terminal_window = LlmTerminalWindow(parent=None)
                 logger.info("DialogService: Created new LlmTerminalWindow instance.")
+                if hasattr(self.chat_manager, 'get_llm_communication_logger') and \
+                        (llm_logger := self.chat_manager.get_llm_communication_logger()):
+                    try:
+                        llm_logger.new_terminal_log_entry.disconnect(self._llm_terminal_window.add_log_entry)
+                    except TypeError:  # Was not connected
+                        pass
+                    llm_logger.new_terminal_log_entry.connect(self._llm_terminal_window.add_log_entry)
+                    logger.info("DialogService: Connected LLM logger to new LlmTerminalWindow.")
 
             if self._llm_terminal_window:
                 self._llm_terminal_window.show()
@@ -57,6 +68,34 @@ class DialogService(QObject):
         except Exception as e_term:
             logger.error(f"Error showing LlmTerminalWindow: {e_term}", exc_info=True)
             QMessageBox.critical(self.parent_window, "Dialog Error", f"Could not open LLM Terminal:\n{e_term}")
+            return None
+
+    def show_code_viewer(self, ensure_creation: bool = True) -> Optional[CodeViewerWindow]:
+        logger.debug(f"DialogService: Request to show Code Viewer (ensure_creation={ensure_creation}).")
+        try:
+            if self._code_viewer_window is None and ensure_creation:
+                self._code_viewer_window = CodeViewerWindow(parent=self.parent_window)
+                logger.info("DialogService: Created new CodeViewerWindow instance.")
+                # Connect apply_change_requested from CodeViewerWindow to the EventBus
+                # This assumes CodeViewerWindow has a signal named 'apply_change_requested'
+                if hasattr(self._code_viewer_window, 'apply_change_requested'):
+                    self._code_viewer_window.apply_change_requested.connect(
+                        lambda proj_id, rel_fp, content, focus_p:
+                        self._event_bus.applyFileChangeRequested.emit(proj_id, rel_fp, content, focus_p)
+                    )
+                    logger.info("DialogService: Connected CodeViewerWindow.apply_change_requested to EventBus.")
+                else:
+                    logger.warning(
+                        "DialogService: CodeViewerWindow instance does not have 'apply_change_requested' signal.")
+
+            if self._code_viewer_window:
+                self._code_viewer_window.show()
+                self._code_viewer_window.activateWindow()
+                self._code_viewer_window.raise_()
+            return self._code_viewer_window
+        except Exception as e_cv:
+            logger.error(f"Error showing CodeViewerWindow: {e_cv}", exc_info=True)
+            QMessageBox.critical(self.parent_window, "Dialog Error", f"Could not open Code Viewer:\n{e_cv}")
             return None
 
     @Slot()
@@ -90,3 +129,9 @@ class DialogService(QObject):
             except Exception as e_close_llm:
                 logger.error(f"Error closing LlmTerminalWindow: {e_close_llm}")
 
+        if self._code_viewer_window:
+            try:
+                self._code_viewer_window.close()
+                logger.debug(" Code Viewer window close requested.")
+            except Exception as e_close_cv:
+                logger.error(f"Error closing CodeViewerWindow: {e_close_cv}")

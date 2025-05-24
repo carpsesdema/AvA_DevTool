@@ -72,7 +72,8 @@ class PlanAndCodeCoordinator(QObject):
         self._current_plan_text = None
         self._parsed_files_list = []
         self._coder_instructions_map = {}
-        self._generated_code_map = {}
+        self._generated_code_map = {fname: (None, None) for fname in
+                                    self._parsed_files_list}  # Initialize for all potential files
         self._coder_tasks = []
         self._active_coder_request_ids = {}
 
@@ -150,6 +151,7 @@ class PlanAndCodeCoordinator(QObject):
                 self._log_comm("PACC_Parser", "Info: FILES_PLANNED list is empty.")
                 return True
 
+            self._generated_code_map = {fname: (None, None) for fname in self._parsed_files_list}
             logger.info(f"PACC: Parsed planned files: {self._parsed_files_list}")
             self._log_comm("PACC_Parser", f"Successfully parsed file list: {self._parsed_files_list}")
 
@@ -165,8 +167,6 @@ class PlanAndCodeCoordinator(QObject):
                 if instruction_match:
                     instruction_text = instruction_match.group(1).strip()
                     self._coder_instructions_map[filename] = instruction_text
-                    self._log_comm("PACC_Parser",
-                                   f"Extracted coder instructions for: {filename} (Length: {len(instruction_text)})")
                 else:
                     logger.warning(f"PACC: Could not find coder instructions for file: {filename} using markers.")
                     self._coder_instructions_map[filename] = f"[Error: Instructions not found by parser for {filename}]"
@@ -195,11 +195,11 @@ class PlanAndCodeCoordinator(QObject):
         self._log_comm("PACC", f"Starting code generation for {len(self._parsed_files_list)} files.")
         self._event_bus.uiStatusUpdateGlobal.emit(f"Sending {len(self._parsed_files_list)} file(s) to Code LLM...",
                                                   "#61afef", False, 0)
+        self._event_bus.uiInputBarBusyStateChanged.emit(True)
 
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_CODERS)
         self._coder_tasks = []
         self._active_coder_request_ids = {}
-        self._generated_code_map = {fname: (None, None) for fname in self._parsed_files_list}
 
         for filename in self._parsed_files_list:
             instructions = self._coder_instructions_map.get(filename)
@@ -213,7 +213,7 @@ class PlanAndCodeCoordinator(QObject):
 
         if not self._coder_tasks:
             logger.warning("PACC: No valid coder tasks to run after filtering instructions.")
-            self._handle_all_coder_tasks_done()  # Call done if no tasks were actually started
+            self._handle_all_coder_tasks_done()
             return
 
         await asyncio.gather(*self._coder_tasks, return_exceptions=True)
@@ -224,6 +224,8 @@ class PlanAndCodeCoordinator(QObject):
             if not self._specialized_llm_backend_id or not self._specialized_llm_model_name:
                 logger.error("PACC: Specialized LLM details not set. Cannot generate code.")
                 self._generated_code_map[filename] = (None, "Specialized LLM not configured.")
+                # If a task fails here, it won't be in _active_coder_request_ids for error handler to clean up.
+                # Ensure _handle_all_coder_tasks_done correctly processes it from _generated_code_map
                 return
 
             coder_request_id = f"coder_req_{filename.replace('/', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
@@ -250,20 +252,18 @@ class PlanAndCodeCoordinator(QObject):
     def _handle_all_coder_tasks_done(self):
         logger.info("PACC: All coder tasks have completed (or errored).")
         successful_files = []
-        failed_files_with_errors: Dict[str, str] = {}  # filename: error_message
+        failed_files_with_errors: Dict[str, str] = {}
 
-        for filename in self._parsed_files_list:  # Iterate original list to ensure all are accounted for
+        for filename in self._parsed_files_list:
             code, err_msg = self._generated_code_map.get(filename, (None, "Task did not complete or store result."))
 
             if code and not err_msg:
                 successful_files.append(filename)
-                logger.info(f"PACC: Successfully generated code for '{filename}'. Length: {len(code)}")
-                self._log_comm("CodeLLM->PACC", f"Generated code for {filename} (length: {len(code)}).")
-                # TODO: Emit signal to display this file's code, e.g., self._event_bus.modificationFileReadyForDisplay.emit(filename, code)
+                self._log_comm("CodeLLM->PACC", f"Finalized generated code for {filename}.")
+                self._event_bus.modificationFileReadyForDisplay.emit(filename, code)
             else:
                 failed_files_with_errors[filename] = err_msg or "Unknown error during generation."
-                logger.error(f"PACC: Failed to generate code for '{filename}': {err_msg}")
-                self._log_comm("CodeLLM Error->PACC", f"Error for {filename}: {err_msg}")
+                self._log_comm("CodeLLM Error->PACC", f"Final error for {filename}: {err_msg}")
 
         summary_message_parts = [f"[System: Code generation phase complete for '{self._original_user_query[:50]}...'."]
         if successful_files:
@@ -280,7 +280,7 @@ class PlanAndCodeCoordinator(QObject):
         self._event_bus.uiStatusUpdateGlobal.emit(
             f"Code generation finished. Success: {len(successful_files)}, Failed: {len(failed_files_with_errors)}",
             "#56b6c2" if not failed_files_with_errors else "#e06c75", False, 0)
-
+        self._event_bus.uiInputBarBusyStateChanged.emit(False)
         self._reset_sequence_state()
 
     def _reset_sequence_state(self):
@@ -291,6 +291,8 @@ class PlanAndCodeCoordinator(QObject):
         self._parsed_files_list = []
         self._coder_instructions_map = {}
         self._original_user_query = None
+        self._specialized_llm_backend_id = None
+        self._specialized_llm_model_name = None
         self._generated_code_map = {}
         logger.info("PACC: Sequence state has been reset.")
 
@@ -302,32 +304,44 @@ class PlanAndCodeCoordinator(QObject):
             logger.info(f"PACC: Received PLAN from Planner LLM (ReqID: {request_id})")
             self._current_plan_text = completed_message.text
             self._log_comm("PlannerLLM->PACC", f"Full Plan Received (length {len(self._current_plan_text)} chars)")
+            self._active_planning_request_id = None  # Clear planner request ID as it's done
 
             if self._parse_planner_response(self._current_plan_text):
                 if not self._parsed_files_list:
                     msg_text = f"[System: Planner LLM indicates no files are needed for '{self._original_user_query[:50]}...']"
                     self._event_bus.uiStatusUpdateGlobal.emit("Planner indicates no files needed.", "#56b6c2", True,
                                                               3000)
+                    self._event_bus.uiInputBarBusyStateChanged.emit(False)
                     self._reset_sequence_state()
                 else:
                     files_str = ", ".join([f"`{f}`" for f in self._parsed_files_list])
                     instructions_found_count = sum(1 for f in self._parsed_files_list if
                                                    not self._coder_instructions_map.get(f, "").startswith("[Error:"))
-                    msg_text = f"[System: Plan received and parsed for '{self._original_user_query[:50]}...'. Files: {files_str}. Instructions found for {instructions_found_count}/{len(self._parsed_files_list)} files. Starting code generation...]"
+                    all_instructions_found = instructions_found_count == len(self._parsed_files_list)
+
+                    msg_text = f"[System: Plan received and parsed for '{self._original_user_query[:50]}...'. Files: {files_str}. Instructions found for {instructions_found_count}/{len(self._parsed_files_list)} files."
+                    if all_instructions_found:
+                        msg_text += " Starting code generation...]"
+                        asyncio.create_task(self._dispatch_code_generation_tasks_async())
+                    else:
+                        msg_text += " Some instructions are missing or invalid. Cannot proceed with code generation.]"
+                        self._event_bus.uiStatusUpdateGlobal.emit("Plan parsed with errors. Code generation aborted.",
+                                                                  "#e06c75", False, 0)
+                        self._event_bus.uiInputBarBusyStateChanged.emit(False)
+                        self._reset_sequence_state()
+
                     plan_summary_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE, parts=[msg_text])
                     self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", plan_summary_msg)
-                    asyncio.create_task(self._dispatch_code_generation_tasks_async())
             else:
                 err_msg_text = f"[System Error: Failed to parse the plan from Planner LLM for '{self._original_user_query[:50]}...'. Please check LLM logs or try rephrasing.]"
                 error_message = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[err_msg_text])
                 self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", error_message)
                 self._event_bus.uiStatusUpdateGlobal.emit("Failed to parse plan.", "#e06c75", False, 0)
+                self._event_bus.uiInputBarBusyStateChanged.emit(False)
                 self._reset_sequence_state()
 
-            self._active_planning_request_id = None
-
         elif purpose == "plan_and_code_coder" and request_id == pacc_internal_req_id and request_id in self._active_coder_request_ids:
-            filename = self._active_coder_request_ids.pop(request_id, "unknown_file")  # Remove as it's handled
+            filename = self._active_coder_request_ids.get(request_id, "unknown_file")  # Use .get for safety
             logger.info(f"PACC: Received CODE from Code LLM for file '{filename}' (ReqID: {request_id})")
 
             raw_code_response = completed_message.text.strip()
@@ -337,33 +351,22 @@ class PlanAndCodeCoordinator(QObject):
             if code_block_match:
                 extracted_code = code_block_match.group(1).strip()
                 self._generated_code_map[filename] = (extracted_code, None)
-                self._log_comm("CodeLLM->PACC",
-                               f"Extracted code for {filename} (length: {len(extracted_code)}). Raw response length: {len(raw_code_response)}")
-                system_message = ChatMessage(role=SYSTEM_ROLE, parts=[f"[System: Code received for `{filename}`.]"])
-                self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", system_message)
             else:
                 logger.warning(
-                    f"PACC: Could not extract code block for '{filename}' from Code LLM response. Storing raw response. Preview: {raw_code_response[:100]}")
+                    f"PACC: Could not extract code block for '{filename}' from Code LLM response. Storing raw. Preview: {raw_code_response[:100]}")
                 self._generated_code_map[filename] = (None,
                                                       f"Could not extract code block. Raw response: {raw_code_response[:200]}...")
-                system_message = ChatMessage(role=ERROR_ROLE, parts=[
-                    f"[System Error: Failed to extract code for `{filename}`. LLM response might be malformed.]"])
-                self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", system_message)
 
-            # Check if all coder tasks associated with this sequence are done
-            # This check is now more robustly handled by asyncio.gather in _dispatch_code_generation_tasks_async
-            # and the subsequent call to _handle_all_coder_tasks_done.
-            # So, we don't need to call _handle_all_coder_tasks_done from here directly anymore.
-
+            # Remove handled coder ID, task management is via asyncio.gather
+            if request_id in self._active_coder_request_ids:
+                del self._active_coder_request_ids[request_id]
         else:
             logger.debug(f"PACC: Ignoring completed LLM response for unrelated purpose/ID: {purpose} / {request_id}")
 
     def _coder_tasks_still_running(self) -> bool:
-        # This method helps check if any coder tasks are still pending before finalizing.
-        return any(not task.done() for task in self._coder_tasks if task)
+        return any(task and not task.done() for task in self._coder_tasks)
 
     def _handle_llm_errors(self, request_id: str, error_message: str):
-        # Check if it's the planner task
         if request_id == self._active_planning_request_id:
             logger.error(f"PACC: Error from Planner LLM (ReqID: {request_id}): {error_message}")
             self._log_comm("PlannerLLM Error->PACC", error_message)
@@ -373,19 +376,18 @@ class PlanAndCodeCoordinator(QObject):
             self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", err_msg)
 
             self._event_bus.uiStatusUpdateGlobal.emit("Planner LLM error. Unable to create plan.", "#e06c75", False, 0)
+            self._event_bus.uiInputBarBusyStateChanged.emit(False)
             self._reset_sequence_state()
 
-        # Check if it's one of the coder tasks
         elif request_id in self._active_coder_request_ids:
-            filename = self._active_coder_request_ids.pop(request_id, "unknown_file")  # Remove as it's handled
+            filename = self._active_coder_request_ids.pop(request_id, "unknown_file")
             logger.error(f"PACC: Error from Code LLM for file '{filename}' (ReqID: {request_id}): {error_message}")
-            self._generated_code_map[filename] = (None, error_message)  # Store the error
+            self._generated_code_map[filename] = (None, error_message)
 
             error_message_text = f"[System Error: Code LLM failed for file `{filename}`: {error_message}]"
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[error_message_text])
             self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", err_msg_obj)
 
-            # Similar to the success case, we don't call _handle_all_coder_tasks_done here directly.
-            # asyncio.gather will collect all results/exceptions, and then _handle_all_coder_tasks_done will be called.
+            # Task completion is handled by asyncio.gather, which then calls _handle_all_coder_tasks_done
         else:
             logger.debug(f"PACC: Ignoring LLM error for unrelated request ID: {request_id}")

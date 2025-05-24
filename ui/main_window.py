@@ -1,3 +1,4 @@
+# ui/main_window.py
 import logging
 import os
 import sys
@@ -147,7 +148,6 @@ class MainWindow(QWidget):
         main_hbox_layout.addWidget(main_splitter)
         self.setLayout(main_hbox_layout)
 
-        # Initialize ChatMessageStateHandler after ChatDisplayArea is ready
         self._chat_message_state_handler = ChatMessageStateHandler(self._event_bus, parent=self)
         if self.p1_chat_display_area.get_model():
             self._chat_message_state_handler.register_model_for_project(
@@ -182,37 +182,30 @@ class MainWindow(QWidget):
 
         bus = self._event_bus
 
-        # Input bar sends message
         if self.p1_chat_input_bar:
             self.p1_chat_input_bar.sendMessageRequested.connect(
                 lambda: bus.userMessageSubmitted.emit(
-                    self.p1_chat_input_bar.get_text() if self.p1_chat_input_bar else "", []
+                    self.p1_chat_input_bar.get_text() if self.p1_chat_input_bar else "",
+                    self.p1_chat_input_bar.get_attached_image_data() if hasattr(self.p1_chat_input_bar,
+                                                                                'get_attached_image_data') else []
                 )
             )
 
-        # Copy text from chat display
         if self.p1_chat_display_area:
             self.p1_chat_display_area.textCopied.connect(
                 lambda text, color: bus.uiTextCopied.emit(text, color)
             )
 
-        # Status and error handling
         bus.uiStatusUpdateGlobal.connect(self.update_status_phase1)
         bus.uiErrorGlobal.connect(self._handle_error_event_phase1)
         bus.uiInputBarBusyStateChanged.connect(self._handle_input_bar_busy_state_change_phase1)
         bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
 
-        # THE ACTUAL FUCKING MESSAGE CONNECTIONS THAT NEED TO WORK:
-        # 1. New messages go to display
+        bus.modificationFileReadyForDisplay.connect(self._handle_code_file_update_event)
+
         bus.newMessageAddedToHistory.connect(self.p1_chat_display_area.add_message_to_model)
-
-        # 2. Clear messages
         bus.activeSessionHistoryCleared.connect(self.p1_chat_display_area.clear_model_display)
-
-        # 3. THIS IS THE KEY ONE - STREAMING CHUNKS
         bus.llmStreamChunkReceived.connect(self.p1_chat_display_area.append_chunk_to_message_by_id)
-
-        # 4. Message completion/error
         bus.llmResponseCompleted.connect(
             lambda request_id, message, stats: self.p1_chat_display_area.finalize_message_by_id(request_id, message,
                                                                                                 False)
@@ -223,6 +216,35 @@ class MainWindow(QWidget):
 
         shortcut_escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         shortcut_escape.activated.connect(self._handle_escape_key_pressed_phase1)
+
+    @Slot(str, str)
+    def _handle_code_file_update_event(self, filename: str, content: str):
+        logger.info(f"MainWindow: Received code update for '{filename}' via EventBus.")
+        if self.dialog_service:
+            code_viewer = self.dialog_service.show_code_viewer(ensure_creation=True)
+            if code_viewer:
+                project_id = "p1_chat_context"
+                focus_prefix = self.app_base_path
+
+                if hasattr(self.chat_manager, 'get_current_project_id'):
+                    current_pid = self.chat_manager.get_current_project_id()
+                    if current_pid: project_id = current_pid
+
+                if hasattr(self.chat_manager, 'get_current_focus_prefix'):  # Assuming such a method might exist later
+                    current_focus = self.chat_manager.get_current_focus_prefix()
+                    if current_focus: focus_prefix = current_focus
+
+                code_viewer.update_or_add_file(
+                    filename,
+                    content,
+                    is_ai_modification=True,
+                    project_id_for_apply=project_id,
+                    focus_prefix_for_apply=focus_prefix
+                )
+            else:
+                logger.error("MainWindow: CodeViewerDialog instance could not be obtained/created.")
+        else:
+            logger.error("MainWindow: DialogService not available to show CodeViewer.")
 
     @Slot(str, str, bool, int)
     def update_status_phase1(self, message: str, color: str, is_temporary: bool = False, duration_ms: int = 3000):
@@ -313,6 +335,12 @@ class MainWindow(QWidget):
                 details.append(f"LLM: {model_short}")
             if self.chat_manager.get_current_chat_personality():
                 details.append("Persona")
+
+            spec_backend_id = constants.GENERATOR_BACKEND_ID
+            spec_model_name = self.chat_manager.get_model_for_backend(spec_backend_id)
+            if spec_model_name:
+                spec_model_short = spec_model_name.split(':')[-1].split('/')[-1].replace("-latest", "")
+                details.append(f"Coder: {spec_model_short}")
 
         self.setWindowTitle(f"{base_title} - [{', '.join(details)}]" if details else base_title)
 
