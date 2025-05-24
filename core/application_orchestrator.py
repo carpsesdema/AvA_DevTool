@@ -1,3 +1,4 @@
+# core/application_orchestrator.py
 import logging
 from typing import Dict, Optional, Any
 
@@ -6,8 +7,8 @@ from PySide6.QtCore import QObject
 try:
     from backends.backend_interface import BackendInterface
     from backends.gemini_adapter import GeminiAdapter
-    from backends.ollama_adapter import OllamaAdapter # ADDED: Import OllamaAdapter
-    from backends.gpt_adapter import GPTAdapter # ADDED: Import GPTAdapter
+    from backends.ollama_adapter import OllamaAdapter
+    from backends.gpt_adapter import GPTAdapter
     from backends.backend_coordinator import BackendCoordinator
     from core.event_bus import EventBus
     from services.llm_communication_logger import LlmCommunicationLogger
@@ -33,22 +34,26 @@ class ApplicationOrchestrator(QObject):
             raise RuntimeError("EventBus could not be instantiated.")
 
         self.gemini_chat_adapter = GeminiAdapter()
-        self.ollama_chat_adapter = OllamaAdapter() # ADDED: Initialize OllamaAdapter
-        self.gpt_chat_adapter = GPTAdapter() # ADDED: Initialize GPTAdapter
-
+        self.ollama_chat_adapter = OllamaAdapter()
+        self.gpt_chat_adapter = GPTAdapter()
+        self.ollama_generator_adapter = OllamaAdapter()
 
         self._all_backend_adapters_dict: Dict[str, BackendInterface] = {
-            "gemini_chat_default": self.gemini_chat_adapter, # Explicitly list for Gemini
-            "ollama_chat_default": self.ollama_chat_adapter, # ADDED: Add OllamaAdapter to dictionary
-            "gpt_chat_default": self.gpt_chat_adapter # ADDED: Add GPTAdapter to dictionary
+            "gemini_chat_default": self.gemini_chat_adapter,
+            "ollama_chat_default": self.ollama_chat_adapter,
+            "gpt_chat_default": self.gpt_chat_adapter,
+            constants.GENERATOR_BACKEND_ID: self.ollama_generator_adapter
         }
-        # The 'constants.DEFAULT_CHAT_BACKEND_ID' will resolve to one of the above keys.
-        # This structure allows flexible default setting without redundancy.
+
         if constants.DEFAULT_CHAT_BACKEND_ID not in self._all_backend_adapters_dict:
-            logger.warning(f"DEFAULT_CHAT_BACKEND_ID '{constants.DEFAULT_CHAT_BACKEND_ID}' not found in adapter map. Falling back to 'gemini_chat_default'.")
-            # Fallback to ensure a default adapter is always present if constants.py is misconfigured
+            logger.warning(
+                f"DEFAULT_CHAT_BACKEND_ID '{constants.DEFAULT_CHAT_BACKEND_ID}' not found in adapter map. Falling back to 'gemini_chat_default'.")
             self._all_backend_adapters_dict[constants.DEFAULT_CHAT_BACKEND_ID] = self.gemini_chat_adapter
 
+        if constants.GENERATOR_BACKEND_ID not in self._all_backend_adapters_dict:
+            logger.warning(
+                f"GENERATOR_BACKEND_ID '{constants.GENERATOR_BACKEND_ID}' not found in adapter map. Attempting to add default Ollama Generator.")
+            self._all_backend_adapters_dict[constants.GENERATOR_BACKEND_ID] = self.ollama_generator_adapter
 
         try:
             self.backend_coordinator = BackendCoordinator(self._all_backend_adapters_dict, parent=self)

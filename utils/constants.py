@@ -8,12 +8,16 @@ logger = logging.getLogger(__name__)
 APP_NAME = "AvA: PySide6 Rebuild"
 APP_VERSION = "0.1.0-Phase1"
 
-# --- Backend Configuration ---
+
 DEFAULT_CHAT_BACKEND_ID = "ollama_chat_default"
 DEFAULT_GEMINI_CHAT_MODEL = "gemini-1.5-flash-latest"
-DEFAULT_OLLAMA_CHAT_MODEL = "llama3:latest"  # FIXED: Use the model you actually have!
+DEFAULT_OLLAMA_CHAT_MODEL = "llama3:latest"
 
-# Rest of the file stays the same...
+
+GENERATOR_BACKEND_ID = "ollama_generator_default"
+DEFAULT_OLLAMA_GENERATOR_MODEL = "codellama:13b"
+
+
 CHAT_FONT_FAMILY = "Segoe UI"
 CHAT_FONT_SIZE = 10
 LOADING_GIF_FILENAME = "loading.gif"

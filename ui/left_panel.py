@@ -1,3 +1,4 @@
+# ui/left_panel.py
 import logging
 from typing import Optional, Dict, List, Any
 
@@ -29,8 +30,11 @@ logger = logging.getLogger(__name__)
 
 
 class LeftControlPanel(QWidget):
-    # This role stores a dict: {"backend_id": "...", "model_name": "..."}
     MODEL_CONFIG_DATA_ROLE = Qt.ItemDataRole.UserRole + 2
+
+    SPECIALIZED_BACKEND_DETAILS = [
+        {"id": constants.GENERATOR_BACKEND_ID, "name": "Generator (Ollama)"},
+    ]
 
     def __init__(self, chat_manager: ChatManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -47,10 +51,6 @@ class LeftControlPanel(QWidget):
         self._init_layout_phase1()
         self._connect_signals_phase1()
 
-        # Initial population and selection should happen after UI is fully set up
-        # and after ChatManager has had a chance to initialize its backends.
-        # This is now triggered by the backendConfigurationChanged event or in MainWindow's showEvent.
-        # For now, we will call it directly after initialization to get initial state.
         self._load_initial_model_settings_phase1()
         logger.info("LeftControlPanel (Phase 1) initialized.")
 
@@ -81,6 +81,15 @@ class LeftControlPanel(QWidget):
         self.chat_llm_combo_box.setObjectName("ChatLlmComboBox")
         self.chat_llm_combo_box.setToolTip("Select the primary AI model for chat")
         self.chat_llm_combo_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.specialized_llm_label = QLabel("Specialized LLM:")
+        self.specialized_llm_label.setFont(self.button_font)
+
+        self.specialized_llm_combo_box = QComboBox()
+        self.specialized_llm_combo_box.setFont(self.button_font)
+        self.specialized_llm_combo_box.setObjectName("SpecializedLlmComboBox")
+        self.specialized_llm_combo_box.setToolTip("Select the AI model for specialized tasks (e.g., code generation)")
+        self.specialized_llm_combo_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self.configure_ai_personality_button = QPushButton(" Configure Persona")
         self.configure_ai_personality_button.setFont(self.button_font)
@@ -115,6 +124,8 @@ class LeftControlPanel(QWidget):
         llm_config_layout.setSpacing(6)
         llm_config_layout.addWidget(self.chat_llm_label)
         llm_config_layout.addWidget(self.chat_llm_combo_box)
+        llm_config_layout.addWidget(self.specialized_llm_label)
+        llm_config_layout.addWidget(self.specialized_llm_combo_box)
         llm_config_layout.addWidget(self.configure_ai_personality_button)
         main_layout.addWidget(self.llm_config_group)
 
@@ -133,84 +144,117 @@ class LeftControlPanel(QWidget):
             lambda: self._event_bus.chatLlmPersonalityEditRequested.emit())
         self.view_llm_terminal_button.clicked.connect(lambda: self._event_bus.showLlmLogWindowRequested.emit())
         self.chat_llm_combo_box.currentIndexChanged.connect(self._on_chat_llm_selected_phase1)
+        self.specialized_llm_combo_box.currentIndexChanged.connect(self._on_specialized_llm_selected_phase1)
 
-        # Connect to backendConfigurationChanged to update the model list
         self._event_bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
-        # Connect to backendBusyStateChanged to update button states
         self._event_bus.backendBusyStateChanged.connect(self._handle_backend_busy_state_changed_event_phase1)
 
     def _load_initial_model_settings_phase1(self):
-        # This method is called to initialize the combo box based on the current state.
-        # It's defensive against multiple calls and ensures the UI reflects the backend.
         self._is_programmatic_model_change = True
         self.chat_llm_combo_box.blockSignals(True)
+        self.specialized_llm_combo_box.blockSignals(True)
 
-        # Populate with models from all available backends
         self._populate_chat_llm_combo_box_phase1()
+        self._populate_specialized_llm_combo_box_phase1()
 
         active_chat_backend_id = self.chat_manager.get_current_active_chat_backend_id()
         active_chat_model_name = self.chat_manager.get_model_for_backend(active_chat_backend_id)
-
-        # Set the combo box to the currently active model
         self._set_combo_box_selection_phase1(self.chat_llm_combo_box, active_chat_backend_id, active_chat_model_name)
 
+        active_specialized_backend_id = constants.GENERATOR_BACKEND_ID
+        active_specialized_model_name = self.chat_manager.get_model_for_backend(active_specialized_backend_id)
+        if not active_specialized_model_name:  # Initialize if not set
+            active_specialized_model_name = constants.DEFAULT_OLLAMA_GENERATOR_MODEL
+            if self.chat_manager:
+                self.chat_manager.set_model_for_backend(active_specialized_backend_id, active_specialized_model_name)
+
+        self._set_combo_box_selection_phase1(self.specialized_llm_combo_box, active_specialized_backend_id,
+                                             active_specialized_model_name)
+
         self.chat_llm_combo_box.blockSignals(False)
+        self.specialized_llm_combo_box.blockSignals(False)
         self._is_programmatic_model_change = False
 
-        # Update tooltip and enabled states based on current ChatManager status
         self.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
         self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
 
     def _populate_chat_llm_combo_box_phase1(self):
         self.chat_llm_combo_box.clear()
         models_added_count = 0
-
         all_backend_ids = self.chat_manager.get_all_available_backend_ids()
 
-        for backend_id in all_backend_ids:
-            available_models_for_backend = self.chat_manager.get_available_models_for_backend(backend_id)
+        user_selectable_chat_ids = {
+            constants.DEFAULT_CHAT_BACKEND_ID,
+            "ollama_chat_default",
+            "gpt_chat_default"
+        }
 
-            # If no models are fetched, provide a default for that backend if it's the current active one
+        for backend_id in all_backend_ids:
+            if backend_id not in user_selectable_chat_ids:
+                continue
+
+            available_models_for_backend = self.chat_manager.get_available_models_for_backend(backend_id)
             if not available_models_for_backend:
-                if backend_id == "gemini_chat_default":
+                if backend_id == constants.DEFAULT_CHAT_BACKEND_ID:  # Default to Gemini if it's the default chat backend
                     available_models_for_backend = [constants.DEFAULT_GEMINI_CHAT_MODEL]
                 elif backend_id == "ollama_chat_default":
                     available_models_for_backend = [constants.DEFAULT_OLLAMA_CHAT_MODEL]
                 elif backend_id == "gpt_chat_default":
-                    # Add a default for GPT if it's not configured
                     available_models_for_backend = ["gpt-4o", "gpt-3.5-turbo"]
 
             for model_name_str in available_models_for_backend:
-                # Determine display name (e.g., "Gemini: 1.5-flash-latest", "Ollama: llama2:13b")
                 display_name_prefix = ""
-                if backend_id == "gemini_chat_default":
+                if backend_id == constants.DEFAULT_CHAT_BACKEND_ID:
                     display_name_prefix = "Gemini: "
-                    model_name_display = model_name_str.replace("models/", "")  # Remove "models/" prefix
+                    model_name_display = model_name_str.replace("models/", "")
                 elif backend_id == "ollama_chat_default":
                     display_name_prefix = "Ollama: "
-                    model_name_display = model_name_str  # Ollama model names are usually clean
+                    model_name_display = model_name_str
                 elif backend_id == "gpt_chat_default":
                     display_name_prefix = "GPT: "
-                    model_name_display = model_name_str  # GPT model names are usually clean
+                    model_name_display = model_name_str
                 else:
-                    model_name_display = model_name_str  # Fallback for unknown backends
+                    model_name_display = model_name_str
 
                 item_display_text = f"{display_name_prefix}{model_name_display}"
                 user_data_for_item = {"backend_id": backend_id, "model_name": model_name_str}
                 self.chat_llm_combo_box.addItem(item_display_text, userData=user_data_for_item)
                 models_added_count += 1
 
-        if models_added_count > 0:
-            self.chat_llm_combo_box.setEnabled(True)
-        else:
+        if models_added_count == 0:
             self.chat_llm_combo_box.addItem("No Chat LLMs Available")
             self.chat_llm_combo_box.setEnabled(False)
+        else:
+            self.chat_llm_combo_box.setEnabled(True)
+
+    def _populate_specialized_llm_combo_box_phase1(self):
+        self.specialized_llm_combo_box.clear()
+        models_added_count = 0
+
+        for backend_detail in self.SPECIALIZED_BACKEND_DETAILS:
+            backend_id = backend_detail["id"]
+            backend_display_name = backend_detail["name"]
+            available_models = self.chat_manager.get_available_models_for_backend(backend_id)
+
+            if not available_models and backend_id == constants.GENERATOR_BACKEND_ID:
+                available_models = [constants.DEFAULT_OLLAMA_GENERATOR_MODEL]
+
+            for model_name_str in available_models:
+                item_display_text = f"{backend_display_name}: {model_name_str}"
+                user_data_for_item = {"backend_id": backend_id, "model_name": model_name_str}
+                self.specialized_llm_combo_box.addItem(item_display_text, userData=user_data_for_item)
+                models_added_count += 1
+
+        if models_added_count == 0:
+            self.specialized_llm_combo_box.addItem("No Specialized LLMs Available")
+            self.specialized_llm_combo_box.setEnabled(False)
+        else:
+            self.specialized_llm_combo_box.setEnabled(True)
 
     def _set_combo_box_selection_phase1(self, combo_box: QComboBox, target_backend_id: str,
                                         target_model_name: Optional[str]):
-        # Iterate through items to find a match for both backend_id and model_name
         for i in range(combo_box.count()):
-            item_data = combo_box.itemData(i)  # itemData() without role uses Qt.ItemDataRole.UserRole by default
+            item_data = combo_box.itemData(i)
             if isinstance(item_data, dict) and \
                     item_data.get("backend_id") == target_backend_id and \
                     item_data.get("model_name") == target_model_name:
@@ -218,8 +262,6 @@ class LeftControlPanel(QWidget):
                     combo_box.setCurrentIndex(i)
                 return
 
-        # Fallback if exact model name not found (e.g., model no longer available, but backend is still active),
-        # try to select any model for the specified backend.
         for i in range(combo_box.count()):
             item_data = combo_box.itemData(i)
             if isinstance(item_data, dict) and item_data.get("backend_id") == target_backend_id:
@@ -227,30 +269,19 @@ class LeftControlPanel(QWidget):
                     combo_box.setCurrentIndex(i)
                 return
 
-        # If still nothing selected, try to set the default backend/model based on constants
         if combo_box.count() > 0:
-            default_backend_id = constants.DEFAULT_CHAT_BACKEND_ID
-            default_model_name = (constants.DEFAULT_OLLAMA_CHAT_MODEL if default_backend_id == "ollama_chat_default"
-                                  else constants.DEFAULT_GEMINI_CHAT_MODEL)
-            for i in range(combo_box.count()):
-                item_data = combo_box.itemData(i)
-                if isinstance(item_data, dict) and \
-                        item_data.get("backend_id") == default_backend_id and \
-                        item_data.get("model_name") == default_model_name:
-                    combo_box.setCurrentIndex(i)
-                    return
-            combo_box.setCurrentIndex(0)  # Fallback to first item if all else fails
+            combo_box.setCurrentIndex(0)
 
     @Slot(int)
     def _on_chat_llm_selected_phase1(self, index: int):
         if self._is_programmatic_model_change or index < 0:
             return
 
-        selected_data = self.chat_llm_combo_box.itemData(index)  # Use default role
+        selected_data = self.chat_llm_combo_box.itemData(index)
         if not isinstance(selected_data, dict) or \
                 "backend_id" not in selected_data or \
                 "model_name" not in selected_data:
-            logger.warning(f"LP: Invalid item data selected in combo box: {selected_data}")
+            logger.warning(f"LP: Invalid item data selected in chat LLM combo box: {selected_data}")
             return
 
         backend_id = selected_data["backend_id"]
@@ -258,40 +289,57 @@ class LeftControlPanel(QWidget):
 
         if self.chat_manager:
             logger.info(
-                f"LP: User selected backend '{backend_id}', model '{model_name}'. Triggering chat manager config.")
-            self.chat_manager.set_active_chat_model_and_backend(backend_id, model_name)
+                f"LP: User selected chat LLM. Backend: '{backend_id}', Model: '{model_name}'. Emitting to EventBus.")
+            self._event_bus.chatLlmSelectionChanged.emit(backend_id, model_name)
+
+    @Slot(int)
+    def _on_specialized_llm_selected_phase1(self, index: int):
+        if self._is_programmatic_model_change or index < 0:
+            return
+
+        selected_data = self.specialized_llm_combo_box.itemData(index)
+        if not isinstance(selected_data, dict) or \
+                "backend_id" not in selected_data or \
+                "model_name" not in selected_data:
+            logger.warning(f"LP: Invalid item data selected in specialized LLM combo box: {selected_data}")
+            return
+
+        backend_id = selected_data["backend_id"]
+        model_name = selected_data["model_name"]
+
+        if self.chat_manager:
+            logger.info(
+                f"LP: User selected specialized LLM. Backend: '{backend_id}', Model: '{model_name}'. Emitting to EventBus.")
+            self._event_bus.specializedLlmSelectionChanged.emit(backend_id, model_name)
 
     @Slot(str, str, bool, list)
     def _handle_backend_configuration_changed_event_phase1(self, backend_id: str, model_name: str, is_configured: bool,
-                                                           available_models: list):
-        # This slot is triggered when any backend's configuration changes.
-        # We need to re-populate the combo box to reflect potentially new available models
-        # or changes in the configured status of the currently active model.
-        logger.debug(f"LP: Backend config changed for '{backend_id}'. Updating combo box.")
+                                                           available_models: list[Any]):
+        logger.debug(f"LP: Backend config changed event for '{backend_id}'. Updating combo boxes.")
         self._is_programmatic_model_change = True
         self.chat_llm_combo_box.blockSignals(True)
+        self.specialized_llm_combo_box.blockSignals(True)
 
-        # Get the currently active model from ChatManager before repopulating
-        current_selected_backend = self.chat_manager.get_current_active_chat_backend_id()
-        current_selected_model = self.chat_manager.get_model_for_backend(
-            current_selected_backend)  # This gets the *configured* model
+        current_chat_backend = self.chat_manager.get_current_active_chat_backend_id()
+        current_chat_model = self.chat_manager.get_model_for_backend(current_chat_backend)
+        current_spec_backend = constants.GENERATOR_BACKEND_ID
+        current_spec_model = self.chat_manager.get_model_for_backend(current_spec_backend)
 
         self._populate_chat_llm_combo_box_phase1()
+        self._populate_specialized_llm_combo_box_phase1()
 
-        # Re-set the selection to what was active (or default if it's no longer available)
-        self._set_combo_box_selection_phase1(self.chat_llm_combo_box, current_selected_backend,
-                                             current_selected_model)
+        self._set_combo_box_selection_phase1(self.chat_llm_combo_box, current_chat_backend, current_chat_model)
+        self._set_combo_box_selection_phase1(self.specialized_llm_combo_box, current_spec_backend, current_spec_model)
 
         self.chat_llm_combo_box.blockSignals(False)
+        self.specialized_llm_combo_box.blockSignals(False)
         self._is_programmatic_model_change = False
-        self.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
 
-        # Update enabled state based on the overall chat manager status
+        self.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
         self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
 
     @Slot(bool)
     def _handle_backend_busy_state_changed_event_phase1(self, is_busy: bool):
-        # Update UI elements based on overall busy state of the backend coordinator
         self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=is_busy)
 
     def update_personality_tooltip(self, active: bool):
@@ -300,13 +348,13 @@ class LeftControlPanel(QWidget):
         self.configure_ai_personality_button.setToolTip(f"{tooltip_base}\nStatus: {status}")
 
     def set_enabled_state(self, enabled: bool, is_busy: bool):
-        effective_enabled = enabled and not is_busy
-        # LLM combo box should be enabled if *any* backend is configured
-        self.chat_llm_combo_box.setEnabled(enabled)  # Keep enabled if at least one backend is ready
-        self.configure_ai_personality_button.setEnabled(effective_enabled)
-        self.new_chat_button.setEnabled(not is_busy)  # New chat always enabled unless busy
-        self.view_llm_terminal_button.setEnabled(True)  # Log always viewable
+        effective_enabled_not_busy = enabled and not is_busy
+        self.chat_llm_combo_box.setEnabled(enabled)
+        self.specialized_llm_combo_box.setEnabled(enabled)
+        self.configure_ai_personality_button.setEnabled(effective_enabled_not_busy)
+        self.new_chat_button.setEnabled(not is_busy)
+        self.view_llm_terminal_button.setEnabled(True)
 
-        # Adjust label color based on overall API readiness
         label_color = "#C0C0C0" if enabled else "#707070"
         self.chat_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")
+        self.specialized_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")

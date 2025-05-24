@@ -1,3 +1,4 @@
+# core/event_bus.py
 import logging
 from typing import Optional
 from PySide6.QtCore import QObject, Signal
@@ -11,6 +12,8 @@ class EventBus(QObject):
     userMessageSubmitted = Signal(str, list)
     newChatRequested = Signal()
     chatLlmPersonalitySubmitted = Signal(str, str)
+    chatLlmSelectionChanged = Signal(str, str)
+    specializedLlmSelectionChanged = Signal(str, str)
 
     showLlmLogWindowRequested = Signal()
     chatLlmPersonalityEditRequested = Signal()
@@ -24,7 +27,7 @@ class EventBus(QObject):
 
     newMessageAddedToHistory = Signal(str, object)
     activeSessionHistoryCleared = Signal(str)
-    activeProjectChanged = Signal(str) # CORRECTED: Added this missing signal
+    activeProjectChanged = Signal(str)
 
     uiStatusUpdateGlobal = Signal(str, str, bool, int)
     uiErrorGlobal = Signal(str, bool)
