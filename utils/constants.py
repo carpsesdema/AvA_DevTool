@@ -49,7 +49,7 @@ Produce the most clean, readable, maintainable, and correct Python code possible
 
 
 CHAT_FONT_FAMILY = "Segoe UI"
-CHAT_FONT_SIZE = 10
+CHAT_FONT_SIZE = 12
 LOADING_GIF_FILENAME = "loading.gif"
 APP_ICON_FILENAME = "Synchat.ico"
 

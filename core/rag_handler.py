@@ -47,15 +47,31 @@ class RagHandler:
 
     # --- END NEW ---
 
-    def __init__(self, upload_service: UploadService, vector_db_service: VectorDBService):
-        if not isinstance(upload_service, UploadService):
-            raise TypeError("RagHandler requires a valid UploadService instance.")
-        if not isinstance(vector_db_service, VectorDBService):
-            raise TypeError("RagHandler requires a valid VectorDBService instance.")
+    def __init__(self, upload_service: Optional[Any], vector_db_service: Optional[Any]):
+        """
+        Initialize the RAG handler with appropriate services for retrieval.
 
-        self._upload_service = upload_service
-        self._vector_db_service = vector_db_service
-        logger.info("RagHandler initialized.")
+        Args:
+            upload_service: Service for uploading and processing documents
+            vector_db_service: Service for vector database operations
+        """
+        self._upload_service = None
+        self._vector_db_service = None
+
+        # Make initialization more robust against missing or invalid services
+        if not upload_service or not isinstance(upload_service, UploadService):
+            logger.warning("RagHandler initialized with invalid or missing UploadService")
+        else:
+            self._upload_service = upload_service
+
+        if not vector_db_service or not isinstance(vector_db_service, VectorDBService):
+            logger.warning("RagHandler initialized with invalid or missing VectorDBService")
+        else:
+            self._vector_db_service = vector_db_service
+
+        logger.info("RagHandler initialized with available services: "
+                    f"UploadService={self._upload_service is not None}, "
+                    f"VectorDBService={self._vector_db_service is not None}")
 
     def should_perform_rag(self, query: str, rag_available: bool, rag_initialized: bool) -> bool:
         """
@@ -154,6 +170,11 @@ class RagHandler:
                 - A formatted string of the retrieved context for the LLM.
                 - A list of collection IDs that were actually queried.
         """
+        # Check if services are available - return empty context if not
+        if not self._upload_service or not self._vector_db_service:
+            logger.warning("RAG services unavailable - cannot retrieve context")
+            return "", []
+
         context_str = ""
         queried_collections_actual = []  # To track which collections were actually queried
 
@@ -170,13 +191,15 @@ class RagHandler:
 
         collections_to_query_candidates = []
         # Always try to query the global collection
-        if self._vector_db_service.is_ready(GLOBAL_COLLECTION_ID):
+        if hasattr(self._vector_db_service, 'is_ready') and self._vector_db_service.is_ready(GLOBAL_COLLECTION_ID):
             collections_to_query_candidates.append(GLOBAL_COLLECTION_ID)
         else:
             logger.warning(f"Global collection '{GLOBAL_COLLECTION_ID}' not ready, skipping for RAG.")
 
         # If a project_id is provided and its collection is ready, add it
-        if project_id and project_id != GLOBAL_COLLECTION_ID and self._vector_db_service.is_ready(project_id):
+        if project_id and project_id != GLOBAL_COLLECTION_ID and hasattr(self._vector_db_service,
+                                                                         'is_ready') and self._vector_db_service.is_ready(
+                project_id):
             collections_to_query_candidates.append(project_id)
         elif project_id and project_id != GLOBAL_COLLECTION_ID:
             logger.warning(f"Project collection '{project_id}' not ready, skipping for RAG.")
@@ -188,11 +211,12 @@ class RagHandler:
         logger.info(f"Attempting RAG retrieval from collections: {collections_to_query_candidates}...")
         try:
             if not hasattr(self._upload_service, 'query_vector_db'):
-                raise TypeError("UploadService missing required 'query_vector_db' method.")
+                logger.error("UploadService missing required 'query_vector_db' method.")
+                return "", []
 
             # Retrieve more initial results to allow for boosting and re-ranking to be effective
-            num_initial_results = constants.RAG_NUM_RESULTS * (3 if is_modification_request else 2)
-            num_final_results = constants.RAG_NUM_RESULTS  # Number of chunks to return to LLM
+            num_initial_results = getattr(constants, 'RAG_NUM_RESULTS', 5) * (3 if is_modification_request else 2)
+            num_final_results = getattr(constants, 'RAG_NUM_RESULTS', 5)  # Number of chunks to return to LLM
 
             relevant_chunks = self._upload_service.query_vector_db(
                 query,
@@ -337,7 +361,7 @@ class RagHandler:
                 logger.info(f"No relevant RAG context found in collections {collections_to_query_candidates}.")
 
         except Exception as e_rag:
-            logger.exception("Error retrieving/re-ranking RAG context:")
+            logger.exception(f"Error retrieving/re-ranking RAG context: {e_rag}")
             context_str = "[Error retrieving RAG context]"
 
         return context_str, queried_collections_actual

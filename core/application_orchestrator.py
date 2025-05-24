@@ -83,11 +83,26 @@ class ApplicationOrchestrator(QObject):
             raise
 
         # --- RAG Services (NEW) ---
-        # UploadService internally manages FileHandler, Chunking, CodeAnalysis, and VectorDB (Chroma)
-        self.upload_service = UploadService()
-        # RagHandler needs access to UploadService (for querying) and VectorDBService (for direct readiness/status checks)
-        # Accessing _vector_db_service via UploadService for now. A public getter on UploadService could be added later.
-        self.rag_handler = RagHandler(self.upload_service, self.upload_service._vector_db_service)
+        # Initialize with safe defaults in case services fail
+        self.upload_service = None
+        self.rag_handler = None
+
+        try:
+            # UploadService internally manages FileHandler, Chunking, CodeAnalysis, and VectorDB (Chroma)
+            self.upload_service = UploadService()
+            # Check if upload_service initialized correctly and has the _vector_db_service attribute
+            vector_db_service = getattr(self.upload_service, '_vector_db_service',
+                                        None) if self.upload_service else None
+
+            # Initialize RagHandler with potentially None services, it will handle them gracefully
+            self.rag_handler = RagHandler(self.upload_service, vector_db_service)
+            logger.info("RAG services initialized successfully")
+
+        except Exception as e_rag:
+            logger.error(f"Failed to initialize RAG services: {e_rag}. RAG functionality will be disabled.")
+            # Ensure upload_service and rag_handler are set to None if initialization failed
+            self.upload_service = None
+            self.rag_handler = None
 
         self.llm_communication_logger: Optional[LlmCommunicationLogger] = None
         try:
@@ -230,14 +245,8 @@ class ApplicationOrchestrator(QObject):
 
     def get_upload_service(self) -> UploadService:  # NEW GETTER for UploadService
         """Returns the initialized UploadService instance."""
-        if not hasattr(self, 'upload_service') or self.upload_service is None:
-            logger.critical("UploadService accessed before proper initialization in Orchestrator.")
-            raise AttributeError("UploadService not initialized.")
-        return self.upload_service
+        return self.upload_service  # May return None if initialization failed
 
     def get_rag_handler(self) -> RagHandler:  # NEW GETTER for RagHandler
         """Returns the initialized RagHandler instance."""
-        if not hasattr(self, 'rag_handler') or self.rag_handler is None:
-            logger.critical("RagHandler accessed before proper initialization in Orchestrator.")
-            raise AttributeError("RagHandler not initialized.")
-        return self.rag_handler
+        return self.rag_handler  # May return None if initialization failed
