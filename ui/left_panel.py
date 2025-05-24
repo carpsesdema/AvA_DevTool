@@ -184,7 +184,7 @@ class LeftControlPanel(QWidget):
         all_backend_ids = self.chat_manager.get_all_available_backend_ids()
 
         user_selectable_chat_ids = {
-            constants.DEFAULT_CHAT_BACKEND_ID,
+            "gemini_chat_default",
             "ollama_chat_default",
             "gpt_chat_default"
         }
@@ -195,7 +195,8 @@ class LeftControlPanel(QWidget):
 
             available_models_for_backend = self.chat_manager.get_available_models_for_backend(backend_id)
             if not available_models_for_backend:
-                if backend_id == constants.DEFAULT_CHAT_BACKEND_ID:  # Default to Gemini if it's the default chat backend
+                # FIXED: Use proper defaults based on backend type
+                if backend_id == "gemini_chat_default":
                     available_models_for_backend = [constants.DEFAULT_GEMINI_CHAT_MODEL]
                 elif backend_id == "ollama_chat_default":
                     available_models_for_backend = [constants.DEFAULT_OLLAMA_CHAT_MODEL]
@@ -203,8 +204,9 @@ class LeftControlPanel(QWidget):
                     available_models_for_backend = ["gpt-4o", "gpt-3.5-turbo"]
 
             for model_name_str in available_models_for_backend:
+                # FIXED: Check actual backend type instead of DEFAULT_CHAT_BACKEND_ID
                 display_name_prefix = ""
-                if backend_id == constants.DEFAULT_CHAT_BACKEND_ID:
+                if backend_id == "gemini_chat_default":
                     display_name_prefix = "Gemini: "
                     model_name_display = model_name_str.replace("models/", "")
                 elif backend_id == "ollama_chat_default":
