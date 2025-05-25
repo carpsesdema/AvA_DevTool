@@ -134,6 +134,16 @@ class LeftControlPanel(QWidget):
         self.view_llm_terminal_button.setStyleSheet(self.button_style_sheet)
         self.view_llm_terminal_button.setIconSize(self.button_icon_size)
 
+        # NEW BUTTON for Code Viewer
+        self.view_generated_code_button = QPushButton(" View Generated Code")
+        self.view_generated_code_button.setFont(self.button_font)
+        self.view_generated_code_button.setIcon(self._get_qta_icon('fa5s.code', color="#ABB2BF")) # Neutral color
+        self.view_generated_code_button.setToolTip("Open or focus the generated code viewer window")
+        self.view_generated_code_button.setObjectName("viewGeneratedCodeButton")
+        self.view_generated_code_button.setStyleSheet(self.button_style_sheet)
+        self.view_generated_code_button.setIconSize(self.button_icon_size)
+
+
     def _init_project_session_widgets(self):  # NEW Method
         self.projects_list_widget = QListWidget()
         self.projects_list_widget.setObjectName("ProjectsListWidget")
@@ -209,6 +219,7 @@ class LeftControlPanel(QWidget):
         actions_layout.setSpacing(6)
         actions_layout.addWidget(self.new_chat_button)  # This is "New Session"
         actions_layout.addWidget(self.view_llm_terminal_button)
+        actions_layout.addWidget(self.view_generated_code_button) # ADDED Code Viewer Button
         main_layout.addWidget(self.actions_group)
 
         main_layout.addStretch(1)  # Pushes everything up
@@ -225,6 +236,10 @@ class LeftControlPanel(QWidget):
 
         self._event_bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
         self._event_bus.backendBusyStateChanged.connect(self._handle_backend_busy_state_changed_event_phase1)
+
+        # Connect new Code Viewer button
+        self.view_generated_code_button.clicked.connect(lambda: self._event_bus.viewCodeViewerRequested.emit())
+
 
     def _connect_project_session_signals(self):  # NEW Method
         self.new_project_button.clicked.connect(self._on_new_project_requested)
@@ -631,6 +646,7 @@ class LeftControlPanel(QWidget):
         # Chat Actions
         self.new_chat_button.setEnabled(not is_busy)  # New Session
         self.view_llm_terminal_button.setEnabled(True)  # Always enabled
+        self.view_generated_code_button.setEnabled(True) # Always enabled for now
 
         # Project/Session Management
         self.projects_list_widget.setEnabled(not is_busy)
