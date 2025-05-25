@@ -23,17 +23,18 @@ except ImportError as e_delegate_import:
 
 logger = logging.getLogger(__name__)
 
-BUBBLE_PADDING_V = 8
-BUBBLE_PADDING_H = 12
-BUBBLE_MARGIN_V = 5
-BUBBLE_MARGIN_H = 10
-BUBBLE_RADIUS = 10
+# Modern professional bubble dimensions
+BUBBLE_PADDING_V = 14      # Generous but not excessive
+BUBBLE_PADDING_H = 18      # Professional spacing
+BUBBLE_MARGIN_V = 12       # Clean separation
+BUBBLE_MARGIN_H = 16       # Professional margins
+BUBBLE_RADIUS = 12         # Modern but not too playful
 IMAGE_PADDING = 5
 MAX_IMAGE_WIDTH = 250
 MAX_IMAGE_HEIGHT = 250
 MIN_BUBBLE_WIDTH = 60
 USER_BUBBLE_INDENT_FACTOR = 0.20
-TIMESTAMP_PADDING_TOP = 4
+TIMESTAMP_PADDING_TOP = 6  # Slightly more space for timestamps
 TIMESTAMP_HEIGHT = 15
 BUBBLE_MAX_WIDTH_PERCENTAGE = 0.75
 

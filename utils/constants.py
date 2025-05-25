@@ -53,17 +53,18 @@ CHAT_FONT_SIZE = 12
 LOADING_GIF_FILENAME = "loading.gif"
 APP_ICON_FILENAME = "Synchat.ico"
 
-USER_BUBBLE_COLOR_HEX = "#0B71E6"
-USER_TEXT_COLOR_HEX = "#FFFFFF"
-AI_BUBBLE_COLOR_HEX = "#3E3E3E"
-AI_TEXT_COLOR_HEX = "#E0E0E0"
-SYSTEM_BUBBLE_COLOR_HEX = "#5A5A5A"
-SYSTEM_TEXT_COLOR_HEX = "#B0B0B0"
-ERROR_BUBBLE_COLOR_HEX = "#730202"
-ERROR_TEXT_COLOR_HEX = "#FFCCCC"
-BUBBLE_BORDER_COLOR_HEX = "#2D2D2D"
-TIMESTAMP_COLOR_HEX = "#888888"
-CODE_BLOCK_BG_COLOR_HEX = "#1E1E1E"
+# Modern Professional Chat Bubbles (Dark Terminal Theme)
+USER_BUBBLE_COLOR_HEX = "#00e676"        # Terminal green for user
+USER_TEXT_COLOR_HEX = "#0d1117"          # Dark text on green background
+AI_BUBBLE_COLOR_HEX = "#21262d"          # Professional dark gray
+AI_TEXT_COLOR_HEX = "#f0f6fc"            # Light text for readability
+SYSTEM_BUBBLE_COLOR_HEX = "#30363d"      # Medium gray
+SYSTEM_TEXT_COLOR_HEX = "#c9d1d9"        # Light gray text
+ERROR_BUBBLE_COLOR_HEX = "#f85149"       # Professional red
+ERROR_TEXT_COLOR_HEX = "#ffffff"         # White text on red
+BUBBLE_BORDER_COLOR_HEX = "#30363d"      # Subtle border
+TIMESTAMP_COLOR_HEX = "#6e7681"          # Muted timestamp
+CODE_BLOCK_BG_COLOR_HEX = "#161b22"      # Code block background
 
 if getattr(sys, 'frozen', False):
     APP_BASE_DIR = os.path.dirname(sys.executable)
