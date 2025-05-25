@@ -9,8 +9,8 @@ APP_NAME = "AvA: PySide6 Rebuild"
 APP_VERSION = "0.1.0-Phase1"
 
 
-DEFAULT_CHAT_BACKEND_ID = "ollama_chat_default"
-DEFAULT_GEMINI_CHAT_MODEL = "gemini-2.0-flash-latest"
+DEFAULT_CHAT_BACKEND_ID = "models/gemini-2.5-flash-preview-05-20"
+DEFAULT_GEMINI_CHAT_MODEL = "models/gemini-2.5-flash-preview-05-20"
 DEFAULT_OLLAMA_CHAT_MODEL = "llama3:latest"
 
 

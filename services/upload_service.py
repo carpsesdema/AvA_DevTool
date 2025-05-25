@@ -166,7 +166,7 @@ class UploadService:
         Checks if the UploadService and its underlying vector database are ready.
 
         Args:
-            collection_id (Optional[str]): If provided, checks if that specific collection is ready.
+            collection_id (Optional[str]): If provided, checks if that specific collection can be accessed/created.
 
         Returns:
             bool: True if ready, False otherwise.
@@ -181,8 +181,19 @@ class UploadService:
         )
         if not base_ready:
             return False
-        # The VectorDBService.is_ready(collection_id) now handles the ChromaDB check
-        return self._vector_db_service.is_ready(collection_id)
+
+        # If no specific collection_id is requested, check basic VectorDB readiness
+        if collection_id is None:
+            return self._vector_db_service.is_ready()
+
+        # For collection-specific checks, try to create/access the collection
+        # instead of just checking if it exists
+        try:
+            test_collection = self._vector_db_service.get_or_create_collection(collection_id)
+            return test_collection is not None
+        except Exception as e:
+            logger.error(f"Cannot access/create collection '{collection_id}': {e}")
+            return False
 
     def process_files_for_context(self, file_paths: List[str], collection_id: str = constants.GLOBAL_COLLECTION_ID) -> \
             Optional[ChatMessage]:
