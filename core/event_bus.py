@@ -15,7 +15,7 @@ class EventBus(QObject):
     chatLlmPersonalitySubmitted = Signal(str, str)  # new_prompt, backend_id_for_persona
     chatLlmSelectionChanged = Signal(str, str)  # backend_id, model_name
     specializedLlmSelectionChanged = Signal(str, str)  # backend_id, model_name
-    requestRagScanDirectory = Signal(str) # NEW: Request a RAG scan for a directory (dir_path)
+    requestRagScanDirectory = Signal(str, str) # NEW: Request a RAG scan for a directory (dir_path, project_id)
 
     # ADDED: Orchestrator-level request for new session
     createNewSessionForProjectRequested = Signal(str)  # project_id (ChatManager emits this)

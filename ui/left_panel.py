@@ -8,7 +8,7 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QSizePolicy,
     QComboBox, QGroupBox, QListWidget, QListWidgetItem, QHBoxLayout,
-    QInputDialog, QMessageBox, QFileDialog  # Added QFileDialog
+    QInputDialog, QMessageBox, QFileDialog
 )
 
 try:
@@ -52,21 +52,21 @@ class LeftControlPanel(QWidget):
             raise TypeError("LeftControlPanel requires a valid ChatManager instance.")
 
         self.chat_manager = chat_manager
-        self._project_manager = chat_manager.get_project_manager()  # Get ProjectManager
+        self._project_manager = chat_manager.get_project_manager()
         self._event_bus = EventBus.get_instance()
         self._is_programmatic_model_change: bool = False
         self._is_programmatic_selection_change: bool = False
 
-        self._init_widgets_phase1()  # Existing widgets
-        self._init_project_session_widgets()  # New widgets
-        self._init_rag_widgets()  # NEW: RAG widgets
-        self._init_layout_phase1()  # Modified layout
-        self._connect_signals_phase1()  # Existing signals
-        self._connect_project_session_signals()  # New signals
-        self._connect_rag_signals()  # NEW: RAG signals
+        self._init_widgets_phase1()
+        self._init_project_session_widgets()
+        self._init_rag_widgets()
+        self._init_layout_phase1()
+        self._connect_signals_phase1()
+        self._connect_project_session_signals()
+        self._connect_rag_signals()
 
         self._load_initial_model_settings_phase1()
-        self.load_initial_projects_and_sessions()  # New: load initial project/session lists
+        self.load_initial_projects_and_sessions()
 
         logger.info("LeftControlPanel initialized.")
 
@@ -84,12 +84,12 @@ class LeftControlPanel(QWidget):
         self.button_icon_size = QSize(16, 16)
 
         self.llm_config_group = QGroupBox("LLM Configuration")
-        self.actions_group = QGroupBox("Chat Actions")  # Renamed for clarity
-        self.projects_group = QGroupBox("Projects & Sessions")  # New Group
-        self.rag_group = QGroupBox("RAG Actions")  # NEW: RAG Group
+        self.actions_group = QGroupBox("Chat Actions")
+        self.projects_group = QGroupBox("Projects & Sessions")
+        self.rag_group = QGroupBox("RAG Actions")
 
         for group_box in [self.llm_config_group, self.actions_group, self.projects_group,
-                          self.rag_group]:  # Added rag_group
+                          self.rag_group]:
             group_box.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 1, QFont.Weight.Bold))
 
         self.chat_llm_label = QLabel("Chat LLM:")
@@ -118,10 +118,10 @@ class LeftControlPanel(QWidget):
         self.configure_ai_personality_button.setStyleSheet(self.button_style_sheet)
         self.configure_ai_personality_button.setIconSize(self.button_icon_size)
 
-        self.new_chat_button = QPushButton(" New Session")  # Renamed
+        self.new_chat_button = QPushButton(" New Session")
         self.new_chat_button.setFont(self.button_font)
         self.new_chat_button.setIcon(self._get_qta_icon('fa5s.comment-dots', color="#61AFEF"))
-        self.new_chat_button.setToolTip("Start a new chat session in the current project (Ctrl+N)")  # Modified
+        self.new_chat_button.setToolTip("Start a new chat session in the current project (Ctrl+N)")
         self.new_chat_button.setObjectName("newChatButton")
         self.new_chat_button.setStyleSheet(self.button_style_sheet)
         self.new_chat_button.setIconSize(self.button_icon_size)
@@ -134,23 +134,21 @@ class LeftControlPanel(QWidget):
         self.view_llm_terminal_button.setStyleSheet(self.button_style_sheet)
         self.view_llm_terminal_button.setIconSize(self.button_icon_size)
 
-        # NEW BUTTON for Code Viewer
         self.view_generated_code_button = QPushButton(" View Generated Code")
         self.view_generated_code_button.setFont(self.button_font)
-        self.view_generated_code_button.setIcon(self._get_qta_icon('fa5s.code', color="#ABB2BF")) # Neutral color
+        self.view_generated_code_button.setIcon(self._get_qta_icon('fa5s.code', color="#ABB2BF"))
         self.view_generated_code_button.setToolTip("Open or focus the generated code viewer window")
         self.view_generated_code_button.setObjectName("viewGeneratedCodeButton")
         self.view_generated_code_button.setStyleSheet(self.button_style_sheet)
         self.view_generated_code_button.setIconSize(self.button_icon_size)
 
-
-    def _init_project_session_widgets(self):  # NEW Method
+    def _init_project_session_widgets(self):
         self.projects_list_widget = QListWidget()
         self.projects_list_widget.setObjectName("ProjectsListWidget")
         self.projects_list_widget.setFont(self.button_font)
         self.projects_list_widget.setToolTip("Select a project")
         self.projects_list_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.projects_list_widget.setMaximumHeight(150)  # Example max height
+        self.projects_list_widget.setMaximumHeight(150)
 
         self.sessions_list_widget = QListWidget()
         self.sessions_list_widget.setObjectName("SessionsListWidget")
@@ -166,11 +164,11 @@ class LeftControlPanel(QWidget):
         self.new_project_button.setStyleSheet(self.button_style_sheet)
         self.new_project_button.setIconSize(self.button_icon_size)
 
-    def _init_rag_widgets(self):  # NEW: RAG Widgets
+    def _init_rag_widgets(self):
         self.scan_rag_directory_button = QPushButton(" Scan Directory for RAG")
         self.scan_rag_directory_button.setFont(self.button_font)
-        self.scan_rag_directory_button.setIcon(self._get_qta_icon('fa5s.search-plus', color="#E0B6FF"))  # Light purple
-        self.scan_rag_directory_button.setToolTip("Scan a directory and add its files to the RAG database")
+        self.scan_rag_directory_button.setIcon(self._get_qta_icon('fa5s.search-plus', color="#E0B6FF"))
+        self.scan_rag_directory_button.setToolTip("Scan a directory and add its files to the RAG database for the current project")
         self.scan_rag_directory_button.setObjectName("scanRagDirectoryButton")
         self.scan_rag_directory_button.setStyleSheet(self.button_style_sheet)
         self.scan_rag_directory_button.setIconSize(self.button_icon_size)
@@ -178,15 +176,14 @@ class LeftControlPanel(QWidget):
         self.rag_status_label = QLabel("RAG Status: Initializing...")
         self.rag_status_label.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 2))
         self.rag_status_label.setObjectName("RagStatusLabel")
-        self.rag_status_label.setStyleSheet("QLabel#RagStatusLabel { color: #888888; }")  # Default grey
+        self.rag_status_label.setStyleSheet("QLabel#RagStatusLabel { color: #888888; }")
         self.rag_status_label.setWordWrap(True)
 
-    def _init_layout_phase1(self):  # MODIFIED Method
+    def _init_layout_phase1(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
 
-        # Projects & Sessions Group
         project_session_layout = QVBoxLayout(self.projects_group)
         project_session_layout.setSpacing(6)
         project_session_layout.addWidget(QLabel("Projects:"))
@@ -197,7 +194,6 @@ class LeftControlPanel(QWidget):
         project_session_layout.addWidget(self.sessions_list_widget)
         main_layout.addWidget(self.projects_group)
 
-        # LLM Configuration Group
         llm_config_layout = QVBoxLayout(self.llm_config_group)
         llm_config_layout.setSpacing(6)
         llm_config_layout.addWidget(self.chat_llm_label)
@@ -207,26 +203,23 @@ class LeftControlPanel(QWidget):
         llm_config_layout.addWidget(self.configure_ai_personality_button)
         main_layout.addWidget(self.llm_config_group)
 
-        # RAG Actions Group (NEW)
         rag_actions_layout = QVBoxLayout(self.rag_group)
         rag_actions_layout.setSpacing(6)
         rag_actions_layout.addWidget(self.scan_rag_directory_button)
         rag_actions_layout.addWidget(self.rag_status_label)
         main_layout.addWidget(self.rag_group)
 
-        # Actions Group
         actions_layout = QVBoxLayout(self.actions_group)
         actions_layout.setSpacing(6)
-        actions_layout.addWidget(self.new_chat_button)  # This is "New Session"
+        actions_layout.addWidget(self.new_chat_button)
         actions_layout.addWidget(self.view_llm_terminal_button)
-        actions_layout.addWidget(self.view_generated_code_button) # ADDED Code Viewer Button
+        actions_layout.addWidget(self.view_generated_code_button)
         main_layout.addWidget(self.actions_group)
 
-        main_layout.addStretch(1)  # Pushes everything up
+        main_layout.addStretch(1)
         self.setLayout(main_layout)
 
     def _connect_signals_phase1(self):
-        # new_chat_button now effectively means "new session for current project"
         self.new_chat_button.clicked.connect(lambda: self._event_bus.newChatRequested.emit())
         self.configure_ai_personality_button.clicked.connect(
             lambda: self._event_bus.chatLlmPersonalityEditRequested.emit())
@@ -236,31 +229,25 @@ class LeftControlPanel(QWidget):
 
         self._event_bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
         self._event_bus.backendBusyStateChanged.connect(self._handle_backend_busy_state_changed_event_phase1)
-
-        # Connect new Code Viewer button
         self.view_generated_code_button.clicked.connect(lambda: self._event_bus.viewCodeViewerRequested.emit())
 
-
-    def _connect_project_session_signals(self):  # NEW Method
+    def _connect_project_session_signals(self):
         self.new_project_button.clicked.connect(self._on_new_project_requested)
         self.projects_list_widget.currentItemChanged.connect(self._on_project_selected)
         self.sessions_list_widget.currentItemChanged.connect(self._on_session_selected)
 
-        # Connect to ProjectManager signals (MainWindow should relay these or pass ProjectManager instance)
-        # For simplicity, assuming MainWindow will call public methods on LeftPanel to update.
-        # If LeftPanel had direct access to ProjectManager instance, it could connect directly:
         if self._project_manager:
             self._project_manager.projectsLoaded.connect(self.populate_projects_list)
-            self._project_manager.projectCreated.connect(self._handle_project_created)  # Connect to internal slot
-            self._project_manager.sessionCreated.connect(self._handle_session_created)  # Connect to internal slot
-            self._project_manager.projectSwitched.connect(self._handle_project_switched)  # Connect to internal slot
-            self._project_manager.sessionSwitched.connect(self._handle_session_switched)  # Connect to internal slot
+            self._project_manager.projectCreated.connect(self._handle_project_created)
+            self._project_manager.sessionCreated.connect(self._handle_session_created)
+            self._project_manager.projectSwitched.connect(self._handle_project_switched)
+            self._project_manager.sessionSwitched.connect(self._handle_session_switched)
 
-    def _connect_rag_signals(self):  # NEW: RAG Signals
+    def _connect_rag_signals(self):
         self.scan_rag_directory_button.clicked.connect(self._on_scan_rag_directory_requested)
         self._event_bus.ragStatusChanged.connect(self._handle_rag_status_changed)
 
-    def load_initial_projects_and_sessions(self):  # NEW Method
+    def load_initial_projects_and_sessions(self):
         logger.debug("LCP: Loading initial projects and sessions.")
         all_projects = self._project_manager.get_all_projects()
         self.populate_projects_list(all_projects)
@@ -268,34 +255,44 @@ class LeftControlPanel(QWidget):
         current_project = self._project_manager.get_current_project()
         if current_project:
             self._select_project_in_list(current_project.id)
-            self.update_sessions_list(current_project.id)  # This will also select current session
+            self.update_sessions_list(current_project.id)
         else:
             self.sessions_list_widget.clear()
+        self.set_enabled_state(
+            enabled=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy()
+        )
+
 
     @Slot()
-    def _on_new_project_requested(self):  # NEW Method
+    def _on_new_project_requested(self):
         project_name, ok = QInputDialog.getText(self, "New Project", "Enter project name:")
         if ok and project_name:
-            # Description can be added later or via another dialog
-            self._event_bus.createNewProjectRequested.emit(project_name, "")  # Orchestrator listens to this
-            # ProjectManager will emit projectCreated, which will update the list.
+            self._event_bus.createNewProjectRequested.emit(project_name, "")
         else:
             logger.info("New project creation cancelled or empty name.")
 
     @Slot()
-    def _on_scan_rag_directory_requested(self):  # NEW: RAG Scan Request
+    def _on_scan_rag_directory_requested(self):
         logger.info("LCP: 'Scan Directory for RAG' button clicked.")
-        # Use QFileDialog to let the user select a directory
-        directory = QFileDialog.getExistingDirectory(self, "Select Directory to Scan for RAG",
-                                                     os.path.expanduser("~"))  # Start in user's home directory
+
+        current_project = self._project_manager.get_current_project()
+        if not current_project:
+            logger.warning("LCP: RAG scan requested but no project is active.")
+            self._event_bus.uiErrorGlobal.emit("A project must be active to scan for RAG.", True)
+            return
+
+        project_id = current_project.id
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory to Scan for Project RAG",
+                                                     os.path.expanduser("~"))
 
         if directory:
-            logger.info(f"LCP: User selected directory for RAG scan: {directory}")
-            self._event_bus.requestRagScanDirectory.emit(directory)
+            logger.info(f"LCP: User selected directory for RAG scan: {directory} for project {project_id}")
+            self._event_bus.requestRagScanDirectory.emit(directory, project_id)
         else:
             logger.info("LCP: RAG directory scan selection cancelled.")
 
-    @Slot(QListWidgetItem, QListWidgetItem)  # NEW Method
+    @Slot(QListWidgetItem, QListWidgetItem)
     def _on_project_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]):
         if self._is_programmatic_selection_change or not current:
             return
@@ -303,9 +300,8 @@ class LeftControlPanel(QWidget):
         if project_id and (not previous or project_id != previous.data(self.PROJECT_ID_ROLE)):
             logger.info(f"LCP: Project selected by user: {project_id}")
             self._project_manager.switch_to_project(project_id)
-            # projectSwitched signal from ProjectManager will call _handle_project_switched
 
-    @Slot(QListWidgetItem, QListWidgetItem)  # NEW Method
+    @Slot(QListWidgetItem, QListWidgetItem)
     def _on_session_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]):
         if self._is_programmatic_selection_change or not current:
             return
@@ -314,10 +310,8 @@ class LeftControlPanel(QWidget):
         if session_id and current_project and (not previous or session_id != previous.data(self.SESSION_ID_ROLE)):
             logger.info(f"LCP: Session selected by user: {session_id} in project {current_project.id}")
             self._project_manager.switch_to_session(session_id)
-            # sessionSwitched signal from ProjectManager will call _handle_session_switched
 
-    # --- Slots to update UI based on ProjectManager signals ---
-    @Slot(list)  # List[Project] # NEW Method
+    @Slot(list)
     def populate_projects_list(self, projects: List[Project]):
         logger.debug(f"LCP: Populating projects list with {len(projects)} projects.")
         self._is_programmatic_selection_change = True
@@ -333,49 +327,52 @@ class LeftControlPanel(QWidget):
         if current_proj_obj:
             self._select_project_in_list(current_proj_obj.id)
 
-    @Slot(str)  # project_id # NEW Method
+    @Slot(str)
     def _handle_project_created(self, project_id: str):
-        project = self._project_manager.get_project_by_id(project_id)  # Requires get_project_by_id in ProjectManager
+        project = self._project_manager.get_project_by_id(project_id)
         if project:
             self._is_programmatic_selection_change = True
             item = QListWidgetItem(project.name)
             item.setData(self.PROJECT_ID_ROLE, project.id)
             item.setToolTip(project.description or project.name)
             self.projects_list_widget.addItem(item)
-            # self.projects_list_widget.setCurrentItem(item) # Optionally select new project
             self._is_programmatic_selection_change = False
 
-    @Slot(str)  # project_id # NEW Method
+    @Slot(str)
     def _handle_project_switched(self, project_id: str):
         logger.debug(f"LCP: Handling project switched to {project_id}")
         self._select_project_in_list(project_id)
         self.update_sessions_list(project_id)
+        self.set_enabled_state(
+            enabled=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy()
+        )
 
-    @Slot(str, str)  # project_id, session_id # NEW Method
+    @Slot(str, str)
     def _handle_session_created(self, project_id: str, session_id: str):
         current_project = self._project_manager.get_current_project()
         if current_project and current_project.id == project_id:
-            session = self._project_manager.get_session_by_id(session_id)  # Requires get_session_by_id
+            session = self._project_manager.get_session_by_id(session_id)
             if session:
                 self._is_programmatic_selection_change = True
                 item = QListWidgetItem(session.name)
                 item.setData(self.SESSION_ID_ROLE, session.id)
                 self.sessions_list_widget.addItem(item)
-                # self.sessions_list_widget.setCurrentItem(item) # Optionally select new session
                 self._is_programmatic_selection_change = False
 
-    @Slot(str, str)  # project_id, session_id # NEW Method
+    @Slot(str, str)
     def _handle_session_switched(self, project_id: str, session_id: str):
         logger.debug(f"LCP: Handling session switched to P:{project_id} S:{session_id}")
         current_project = self._project_manager.get_current_project()
         if current_project and current_project.id == project_id:
-            # Ensure sessions list is for the current project
-            # If project hasn't changed, update_sessions_list might not have been called by project_switched
-            # so call it here to be sure, or ensure project_switched always updates sessions.
-            # self.update_sessions_list(project_id) # This might cause re-selection loop if not careful
             self._select_session_in_list(session_id)
+        self.set_enabled_state(
+            enabled=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy()
+        )
 
-    def _select_project_in_list(self, project_id_to_select: str):  # NEW Method
+
+    def _select_project_in_list(self, project_id_to_select: str):
         self._is_programmatic_selection_change = True
         for i in range(self.projects_list_widget.count()):
             item = self.projects_list_widget.item(i)
@@ -385,7 +382,7 @@ class LeftControlPanel(QWidget):
                 break
         self._is_programmatic_selection_change = False
 
-    def _select_session_in_list(self, session_id_to_select: str):  # NEW Method
+    def _select_session_in_list(self, session_id_to_select: str):
         self._is_programmatic_selection_change = True
         for i in range(self.sessions_list_widget.count()):
             item = self.sessions_list_widget.item(i)
@@ -395,7 +392,7 @@ class LeftControlPanel(QWidget):
                 break
         self._is_programmatic_selection_change = False
 
-    def update_sessions_list(self, project_id: str):  # NEW Method
+    def update_sessions_list(self, project_id: str):
         logger.debug(f"LCP: Updating sessions list for project ID: {project_id}")
         self._is_programmatic_selection_change = True
         self.sessions_list_widget.clear()
@@ -408,13 +405,10 @@ class LeftControlPanel(QWidget):
         current_session_obj = self._project_manager.get_current_session()
         if current_session_obj and current_session_obj.project_id == project_id:
             self._select_session_in_list(current_session_obj.id)
-        elif sessions:  # If no current session but sessions exist, select the first one
+        elif sessions:
             self._select_session_in_list(sessions[0].id)
-            # And tell ProjectManager to make it current (if it's not already)
-            # This might be better handled by ensuring ProjectManager always has a current session if one exists.
             if not current_session_obj or current_session_obj.id != sessions[0].id:
                 self._project_manager.switch_to_session(sessions[0].id)
-
         self._is_programmatic_selection_change = False
 
     def _load_initial_model_settings_phase1(self):
@@ -442,188 +436,101 @@ class LeftControlPanel(QWidget):
         self.chat_llm_combo_box.blockSignals(False)
         self.specialized_llm_combo_box.blockSignals(False)
         self._is_programmatic_model_change = False
-
         self.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
-
-        # Initial RAG status check and update for the new label
-        self.chat_manager._check_rag_readiness_and_emit_status()  # Directly call CM method to trigger signal
-
-        # Initial overall enabled state
+        self.chat_manager._check_rag_readiness_and_emit_status()
         self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
 
     def _populate_chat_llm_combo_box_phase1(self):
-        # ... (remains the same as your version)
         self.chat_llm_combo_box.clear()
         models_added_count = 0
         all_backend_ids = self.chat_manager.get_all_available_backend_ids()
-
-        user_selectable_chat_ids = {
-            "gemini_chat_default",
-            "ollama_chat_default",
-            "gpt_chat_default"
-        }
-
+        user_selectable_chat_ids = {"gemini_chat_default", "ollama_chat_default", "gpt_chat_default"}
         for backend_id in all_backend_ids:
-            if backend_id not in user_selectable_chat_ids:
-                continue
-
+            if backend_id not in user_selectable_chat_ids: continue
             available_models_for_backend = self.chat_manager.get_available_models_for_backend(backend_id)
             if not available_models_for_backend:
-                # FIXED: Use proper defaults based on backend type
-                if backend_id == "gemini_chat_default":
-                    available_models_for_backend = [constants.DEFAULT_GEMINI_CHAT_MODEL]
-                elif backend_id == "ollama_chat_default":
-                    available_models_for_backend = [constants.DEFAULT_OLLAMA_CHAT_MODEL]
-                elif backend_id == "gpt_chat_default":
-                    available_models_for_backend = ["gpt-4o", "gpt-3.5-turbo"]  # Example
-
+                if backend_id == "gemini_chat_default": available_models_for_backend = [constants.DEFAULT_GEMINI_CHAT_MODEL]
+                elif backend_id == "ollama_chat_default": available_models_for_backend = [constants.DEFAULT_OLLAMA_CHAT_MODEL]
+                elif backend_id == "gpt_chat_default": available_models_for_backend = ["gpt-4o", "gpt-3.5-turbo"]
             for model_name_str in available_models_for_backend:
                 display_name_prefix = ""
-                if backend_id == "gemini_chat_default":
-                    display_name_prefix = "Gemini: "
-                    model_name_display = model_name_str.replace("models/", "")
-                elif backend_id == "ollama_chat_default":
-                    display_name_prefix = "Ollama: "
-                    model_name_display = model_name_str
-                elif backend_id == "gpt_chat_default":
-                    display_name_prefix = "GPT: "
-                    model_name_display = model_name_str
-                else:
-                    model_name_display = model_name_str
-
+                if backend_id == "gemini_chat_default": display_name_prefix = "Gemini: "; model_name_display = model_name_str.replace("models/", "")
+                elif backend_id == "ollama_chat_default": display_name_prefix = "Ollama: "; model_name_display = model_name_str
+                elif backend_id == "gpt_chat_default": display_name_prefix = "GPT: "; model_name_display = model_name_str
+                else: model_name_display = model_name_str
                 item_display_text = f"{display_name_prefix}{model_name_display}"
                 user_data_for_item = {"backend_id": backend_id, "model_name": model_name_str}
                 self.chat_llm_combo_box.addItem(item_display_text, userData=user_data_for_item)
                 models_added_count += 1
-
-        if models_added_count == 0:
-            self.chat_llm_combo_box.addItem("No Chat LLMs Available")
-            self.chat_llm_combo_box.setEnabled(False)
-        else:
-            self.chat_llm_combo_box.setEnabled(True)
+        if models_added_count == 0: self.chat_llm_combo_box.addItem("No Chat LLMs Available"); self.chat_llm_combo_box.setEnabled(False)
+        else: self.chat_llm_combo_box.setEnabled(True)
 
     def _populate_specialized_llm_combo_box_phase1(self):
-        # ... (remains the same as your version)
         self.specialized_llm_combo_box.clear()
         models_added_count = 0
-
         for backend_detail in self.SPECIALIZED_BACKEND_DETAILS:
-            backend_id = backend_detail["id"]
-            backend_display_name = backend_detail["name"]
+            backend_id = backend_detail["id"]; backend_display_name = backend_detail["name"]
             available_models = self.chat_manager.get_available_models_for_backend(backend_id)
-
-            if not available_models and backend_id == constants.GENERATOR_BACKEND_ID:
-                available_models = [constants.DEFAULT_OLLAMA_GENERATOR_MODEL]
-
+            if not available_models and backend_id == constants.GENERATOR_BACKEND_ID: available_models = [constants.DEFAULT_OLLAMA_GENERATOR_MODEL]
             for model_name_str in available_models:
                 item_display_text = f"{backend_display_name}: {model_name_str}"
                 user_data_for_item = {"backend_id": backend_id, "model_name": model_name_str}
                 self.specialized_llm_combo_box.addItem(item_display_text, userData=user_data_for_item)
                 models_added_count += 1
+        if models_added_count == 0: self.specialized_llm_combo_box.addItem("No Specialized LLMs Available"); self.specialized_llm_combo_box.setEnabled(False)
+        else: self.specialized_llm_combo_box.setEnabled(True)
 
-        if models_added_count == 0:
-            self.specialized_llm_combo_box.addItem("No Specialized LLMs Available")
-            self.specialized_llm_combo_box.setEnabled(False)
-        else:
-            self.specialized_llm_combo_box.setEnabled(True)
-
-    def _set_combo_box_selection_phase1(self, combo_box: QComboBox, target_backend_id: str,
-                                        target_model_name: Optional[str]):
-        # ... (remains the same as your version)
+    def _set_combo_box_selection_phase1(self, combo_box: QComboBox, target_backend_id: str, target_model_name: Optional[str]):
         for i in range(combo_box.count()):
             item_data = combo_box.itemData(i)
-            if isinstance(item_data, dict) and \
-                    item_data.get("backend_id") == target_backend_id and \
-                    item_data.get("model_name") == target_model_name:
-                if combo_box.currentIndex() != i:
-                    combo_box.setCurrentIndex(i)
+            if isinstance(item_data, dict) and item_data.get("backend_id") == target_backend_id and item_data.get("model_name") == target_model_name:
+                if combo_box.currentIndex() != i: combo_box.setCurrentIndex(i)
                 return
-
-        for i in range(combo_box.count()):  # Fallback to first model of the backend
+        for i in range(combo_box.count()):
             item_data = combo_box.itemData(i)
             if isinstance(item_data, dict) and item_data.get("backend_id") == target_backend_id:
-                if combo_box.currentIndex() != i:
-                    combo_box.setCurrentIndex(i)
+                if combo_box.currentIndex() != i: combo_box.setCurrentIndex(i)
                 return
-
-        if combo_box.count() > 0:  # Default to first item if nothing matches
-            combo_box.setCurrentIndex(0)
+        if combo_box.count() > 0: combo_box.setCurrentIndex(0)
 
     @Slot(int)
     def _on_chat_llm_selected_phase1(self, index: int):
-        # ... (remains the same as your version)
-        if self._is_programmatic_model_change or index < 0:
-            return
-
+        if self._is_programmatic_model_change or index < 0: return
         selected_data = self.chat_llm_combo_box.itemData(index)
-        if not isinstance(selected_data, dict) or \
-                "backend_id" not in selected_data or \
-                "model_name" not in selected_data:
-            logger.warning(f"LP: Invalid item data selected in chat LLM combo box: {selected_data}")
-            return
-
-        backend_id = selected_data["backend_id"]
-        model_name = selected_data["model_name"]
-
-        if self.chat_manager:
-            logger.info(
-                f"LP: User selected chat LLM. Backend: '{backend_id}', Model: '{model_name}'. Emitting to EventBus.")
-            self._event_bus.chatLlmSelectionChanged.emit(backend_id, model_name)
+        if not isinstance(selected_data, dict) or "backend_id" not in selected_data or "model_name" not in selected_data:
+            logger.warning(f"LP: Invalid item data selected in chat LLM combo box: {selected_data}"); return
+        backend_id, model_name = selected_data["backend_id"], selected_data["model_name"]
+        if self.chat_manager: logger.info(f"LP: User selected chat LLM. Backend: '{backend_id}', Model: '{model_name}'. Emitting to EventBus."); self._event_bus.chatLlmSelectionChanged.emit(backend_id, model_name)
 
     @Slot(int)
     def _on_specialized_llm_selected_phase1(self, index: int):
-        # ... (remains the same as your version)
-        if self._is_programmatic_model_change or index < 0:
-            return
-
+        if self._is_programmatic_model_change or index < 0: return
         selected_data = self.specialized_llm_combo_box.itemData(index)
-        if not isinstance(selected_data, dict) or \
-                "backend_id" not in selected_data or \
-                "model_name" not in selected_data:
-            logger.warning(f"LP: Invalid item data selected in specialized LLM combo box: {selected_data}")
-            return
-
-        backend_id = selected_data["backend_id"]
-        model_name = selected_data["model_name"]
-
-        if self.chat_manager:
-            logger.info(
-                f"LP: User selected specialized LLM. Backend: '{backend_id}', Model: '{model_name}'. Emitting to EventBus.")
-            self._event_bus.specializedLlmSelectionChanged.emit(backend_id, model_name)
+        if not isinstance(selected_data, dict) or "backend_id" not in selected_data or "model_name" not in selected_data:
+            logger.warning(f"LP: Invalid item data selected in specialized LLM combo box: {selected_data}"); return
+        backend_id, model_name = selected_data["backend_id"], selected_data["model_name"]
+        if self.chat_manager: logger.info(f"LP: User selected specialized LLM. Backend: '{backend_id}', Model: '{model_name}'. Emitting to EventBus."); self._event_bus.specializedLlmSelectionChanged.emit(backend_id, model_name)
 
     @Slot(str, str, bool, list)
-    def _handle_backend_configuration_changed_event_phase1(self, backend_id: str, model_name: str, is_configured: bool,
-                                                           available_models: list[Any]):
-        # ... (remains the same as your version)
+    def _handle_backend_configuration_changed_event_phase1(self, backend_id: str, model_name: str, is_configured: bool, available_models: list[Any]):
         logger.debug(f"LP: Backend config changed event for '{backend_id}'. Updating combo boxes.")
         self._is_programmatic_model_change = True
-        self.chat_llm_combo_box.blockSignals(True)
-        self.specialized_llm_combo_box.blockSignals(True)
-
-        current_chat_backend = self.chat_manager.get_current_active_chat_backend_id()
-        current_chat_model = self.chat_manager.get_model_for_backend(current_chat_backend)
-        current_spec_backend = constants.GENERATOR_BACKEND_ID
-        current_spec_model = self.chat_manager.get_model_for_backend(current_spec_backend)
-
-        self._populate_chat_llm_combo_box_phase1()
-        self._populate_specialized_llm_combo_box_phase1()
-
+        self.chat_llm_combo_box.blockSignals(True); self.specialized_llm_combo_box.blockSignals(True)
+        current_chat_backend = self.chat_manager.get_current_active_chat_backend_id(); current_chat_model = self.chat_manager.get_model_for_backend(current_chat_backend)
+        current_spec_backend = constants.GENERATOR_BACKEND_ID; current_spec_model = self.chat_manager.get_model_for_backend(current_spec_backend)
+        self._populate_chat_llm_combo_box_phase1(); self._populate_specialized_llm_combo_box_phase1()
         self._set_combo_box_selection_phase1(self.chat_llm_combo_box, current_chat_backend, current_chat_model)
         self._set_combo_box_selection_phase1(self.specialized_llm_combo_box, current_spec_backend, current_spec_model)
-
-        self.chat_llm_combo_box.blockSignals(False)
-        self.specialized_llm_combo_box.blockSignals(False)
+        self.chat_llm_combo_box.blockSignals(False); self.specialized_llm_combo_box.blockSignals(False)
         self._is_programmatic_model_change = False
-
         self.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
         self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
 
-    @Slot(bool, str, str)  # NEW: RAG Status Slot
+    @Slot(bool, str, str)
     def _handle_rag_status_changed(self, is_ready: bool, status_text: str, status_color: str):
         logger.debug(f"LCP: RAG Status Changed: Ready={is_ready}, Text='{status_text}', Color='{status_color}'")
         self.rag_status_label.setText(f"RAG Status: {status_text}")
         self.rag_status_label.setStyleSheet(f"QLabel#RagStatusLabel {{ color: {status_color}; }}")
-        # Update enabled state of scan button based on RAG readiness and overall busy state
         self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
 
     @Slot(bool)
@@ -635,29 +542,24 @@ class LeftControlPanel(QWidget):
         status = "(Custom Persona Active)" if active else "(Default Persona)"
         self.configure_ai_personality_button.setToolTip(f"{tooltip_base}\nStatus: {status}")
 
-    def set_enabled_state(self, enabled: bool, is_busy: bool):  # MODIFIED: Enable/disable project/session UI
+    def set_enabled_state(self, enabled: bool, is_busy: bool):
         effective_enabled_not_busy = enabled and not is_busy
+        is_project_active = self.chat_manager.get_current_project_id() is not None
 
-        # LLM Config
-        self.chat_llm_combo_box.setEnabled(enabled)  # Can change LLM even if busy, new config applies on next req
+        self.chat_llm_combo_box.setEnabled(enabled)
         self.specialized_llm_combo_box.setEnabled(enabled)
         self.configure_ai_personality_button.setEnabled(effective_enabled_not_busy)
 
-        # Chat Actions
-        self.new_chat_button.setEnabled(not is_busy)  # New Session
-        self.view_llm_terminal_button.setEnabled(True)  # Always enabled
-        self.view_generated_code_button.setEnabled(True) # Always enabled for now
+        self.new_chat_button.setEnabled(not is_busy and is_project_active)
+        self.view_llm_terminal_button.setEnabled(True)
+        self.view_generated_code_button.setEnabled(True)
 
-        # Project/Session Management
         self.projects_list_widget.setEnabled(not is_busy)
-        self.sessions_list_widget.setEnabled(not is_busy)
+        self.sessions_list_widget.setEnabled(not is_busy and is_project_active)
         self.new_project_button.setEnabled(not is_busy)
 
-        # RAG Actions (NEW)
-        # Scan button is enabled if not busy AND RAG system is ready (or at least the DB client is initialized)
-        self.scan_rag_directory_button.setEnabled(not is_busy and self.chat_manager.is_rag_ready())
+        self.scan_rag_directory_button.setEnabled(not is_busy and self.chat_manager.is_rag_ready() and is_project_active)
 
         label_color = "#C0C0C0" if enabled else "#707070"
         self.chat_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")
         self.specialized_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")
-        # RAG status label color is set by _handle_rag_status_changed based on RAG readiness itself.
