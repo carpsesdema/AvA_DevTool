@@ -429,10 +429,39 @@ Make the code production-ready and well-structured."""
         )
 
     def _get_current_project_directory(self) -> str:
-        """Get the current project's working directory"""
-        # For now, return current working directory
-        # This could be enhanced to use project-specific directories
-        return os.getcwd()
+        """Get the current project's working directory with smart fallbacks"""
+        import os
+        from datetime import datetime
+
+        # Option 1: Check if user has a configured project directory
+        # (You could add this to user settings later)
+        user_projects_dir = getattr(self, '_user_projects_directory', None)
+        if user_projects_dir and os.path.exists(user_projects_dir):
+            return user_projects_dir
+
+        # Option 2: Create organized output structure
+        base_output_dir = os.path.join(os.getcwd(), "ava_generated_projects")
+
+        # Create project-specific subdirectory based on current AvA project
+        if self._current_project_id and self._project_manager:
+            project_obj = self._project_manager.get_project_by_id(self._current_project_id)
+            if project_obj:
+                # Use project name as folder (sanitized)
+                safe_project_name = "".join(c for c in project_obj.name if c.isalnum() or c in (' ', '-', '_')).strip()
+                safe_project_name = safe_project_name.replace(' ', '_')
+                project_output_dir = os.path.join(base_output_dir, safe_project_name)
+            else:
+                project_output_dir = os.path.join(base_output_dir, f"project_{self._current_project_id[:8]}")
+        else:
+            # Ultimate fallback: timestamped folder
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            project_output_dir = os.path.join(base_output_dir, f"untitled_project_{timestamp}")
+
+        # Ensure directory exists
+        os.makedirs(project_output_dir, exist_ok=True)
+        logger.info(f"CM: Using project directory: {project_output_dir}")
+
+        return project_output_dir
 
     def _extract_code_from_response(self, response_text: str) -> Optional[str]:
         """Extract code from LLM response, handling various code block formats"""

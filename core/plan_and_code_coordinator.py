@@ -145,21 +145,37 @@ class PlanAndCodeCoordinator(QObject):
             f"\nProject directory: {self._project_files_dir}",
             "\nYour response MUST be structured as follows:",
             "1.  **Overall Design Philosophy:** Briefly (1-2 sentences) describe the approach for the project structure and main components.",
-            "2.  **Files Planned:** A Python list of relative file paths that need to be created. (e.g., FILES_PLANNED: ['src/main.py', 'src/utils.py', 'templates/index.html'])",
-            "3.  **Per-File Coder Instructions:** For EACH file in FILES_PLANNED, provide a detailed set of instructions for the Coder AI. Each file's instructions should be clearly demarcated.",
-            "    --- CODER_INSTRUCTIONS_START: path/to/filename.ext ---",
-            "    File Purpose: [Brief description of this file's role.]",
-            "    Is New File: ['Yes'] (For new projects, all files are new)",
-            "    Inter-File Dependencies: [List other planned files this file interacts with, and how.]",
-            "    Key Requirements:",
-            "    - [Detailed instruction 1 for Coder AI. Be explicit: function signatures with type hints, class structures, logic flow, error handling, etc.]",
-            "    - [Detailed instruction 2...]",
-            "    Imports Needed: [Suggest specific imports required for this file.]",
-            "    IMPORTANT CODER OUTPUT FORMAT: (Remind the Coder AI that its response for this file MUST be ONE single Markdown fenced code block: ```python path/to/filename.ext\\nCODE_HERE\\n```. NO other text.)",
-            "    --- CODER_INSTRUCTIONS_END: path/to/filename.ext ---",
-            "\nEnsure the Coder AI instructions are thorough enough for a separate, specialized code generation AI to produce complete and correct code for each file.",
+            "",
+            "2.  **Files Planned:** EXACTLY in this format:",
+            "FILES_PLANNED: ['relative/path/file1.py', 'relative/path/file2.py', 'relative/path/file3.py']",
+            "",
+            "IMPORTANT: The FILES_PLANNED line must be EXACTLY as shown above - start with 'FILES_PLANNED:' followed by a Python list.",
+            "Example: FILES_PLANNED: ['calculator.py', 'utils.py', 'main.py']",
+            "",
+            "3.  **Per-File Coder Instructions:** For EACH file in FILES_PLANNED, provide detailed instructions:",
+            "",
+            "--- CODER_INSTRUCTIONS_START: relative/path/filename.py ---",
+            "File Purpose: [Brief description of this file's role.]",
+            "Is New File: Yes",
+            "Inter-File Dependencies: [List other planned files this file interacts with, and how.]",
+            "Key Requirements:",
+            "- [Detailed instruction 1 for Coder AI. Be explicit: function signatures with type hints, class structures, logic flow, error handling, etc.]",
+            "- [Detailed instruction 2...]",
+            "- [More detailed instructions...]",
+            "Imports Needed: [Suggest specific imports required for this file.]",
+            "IMPORTANT CODER OUTPUT FORMAT: The Coder AI MUST respond with ONE single Markdown fenced code block: ```python\\nCODE_HERE\\n```. NO other text.",
+            "--- CODER_INSTRUCTIONS_END: relative/path/filename.py ---",
+            "",
+            "Ensure the Coder AI instructions are thorough enough for a separate, specialized code generation AI to produce complete and correct code for each file.",
             "Focus on clarity, modularity, and best practices. The Coder AI will use a dedicated system prompt focused on code quality (PEP 8, type hints, docstrings, robustness).",
-            "\nIMPORTANT: The generated code will be automatically validated using tools like linting and testing. Include appropriate error handling and follow Python best practices."
+            "",
+            "CRITICAL REMINDERS:",
+            "- FILES_PLANNED must be a valid Python list format",
+            "- Each file needs matching CODER_INSTRUCTIONS_START/END blocks",
+            "- Generated code will be automatically validated using linting tools",
+            "",
+            "Example structure for a calculator request:",
+            "FILES_PLANNED: ['calculator.py', 'main.py']"
         ]
         return "\n".join(prompt_parts)
 
@@ -168,13 +184,39 @@ class PlanAndCodeCoordinator(QObject):
         self._coder_instructions_map = {}
 
         try:
-            files_planned_match = re.search(r"FILES_PLANNED:\s*(\[.*?\])", plan_text, re.DOTALL | re.IGNORECASE)
+            # IMPROVED: More flexible parsing with multiple patterns
+            files_planned_patterns = [
+                r"FILES_PLANNED:\s*(\[.*?\])",  # Original pattern
+                r"Files?\s*Planned:\s*(\[.*?\])",  # More flexible
+                r"FILES_PLANNED\s*=\s*(\[.*?\])",  # With equals
+                r"files?_planned:\s*(\[.*?\])",  # Lowercase
+                r"(?:FILES_PLANNED|Files?\s*Planned).*?(\[.*?\])",  # Even more flexible
+            ]
+
+            files_planned_match = None
+            for pattern in files_planned_patterns:
+                files_planned_match = re.search(pattern, plan_text, re.DOTALL | re.IGNORECASE)
+                if files_planned_match:
+                    logger.info(f"PACC: Found FILES_PLANNED using pattern: {pattern}")
+                    break
+
             if not files_planned_match:
                 logger.error("PACC: Could not find 'FILES_PLANNED:' section in planner response.")
+                logger.error(f"PACC: Planner response preview: {plan_text[:500]}...")
                 self._log_comm("PACC_Parser", "Error: 'FILES_PLANNED:' section not found.")
-                return False
 
-            files_list_str = files_planned_match.group(1)
+                # ADDED: Try to extract any Python list from the response as fallback
+                fallback_match = re.search(r"\[(?:['\"][^'\"]*['\"],?\s*)+\]", plan_text)
+                if fallback_match:
+                    logger.warning("PACC: Attempting fallback list extraction...")
+                    files_planned_match = fallback_match
+                else:
+                    return False
+
+            files_list_str = files_planned_match.group(
+                1) if files_planned_match.groups() else files_planned_match.group(0)
+            logger.info(f"PACC: Extracted files list string: {files_list_str}")
+
             try:
                 parsed_list_candidate = eval(files_list_str)
                 if not isinstance(parsed_list_candidate, list):
@@ -201,27 +243,49 @@ class PlanAndCodeCoordinator(QObject):
             logger.info(f"PACC: Parsed planned files: {self._parsed_files_list}")
             self._log_comm("PACC_Parser", f"Successfully parsed file list: {self._parsed_files_list}")
 
+            # IMPROVED: More flexible instruction parsing
             missing_instructions_for_files = []
             for filename in self._parsed_files_list:
                 normalized_filename_for_marker = filename.replace("\\", "/")
-                start_marker = f"--- CODER_INSTRUCTIONS_START: {normalized_filename_for_marker} ---"
-                end_marker = f"--- CODER_INSTRUCTIONS_END: {normalized_filename_for_marker} ---"
 
-                instruction_match = re.search(f"{re.escape(start_marker)}(.*?){re.escape(end_marker)}", plan_text,
-                                              re.DOTALL | re.IGNORECASE)
+                # Try multiple instruction block patterns
+                instruction_patterns = [
+                    f"--- CODER_INSTRUCTIONS_START: {re.escape(normalized_filename_for_marker)} ---(.*?)--- CODER_INSTRUCTIONS_END: {re.escape(normalized_filename_for_marker)} ---",
+                    f"CODER_INSTRUCTIONS_START: {re.escape(normalized_filename_for_marker)}(.*?)CODER_INSTRUCTIONS_END: {re.escape(normalized_filename_for_marker)}",
+                    f"Instructions for {re.escape(normalized_filename_for_marker)}:(.*?)(?=(?:Instructions for|--- CODER_INSTRUCTIONS|$))",
+                ]
 
-                if instruction_match:
-                    instruction_text = instruction_match.group(1).strip()
+                instruction_text = None
+                for pattern in instruction_patterns:
+                    instruction_match = re.search(pattern, plan_text, re.DOTALL | re.IGNORECASE)
+                    if instruction_match:
+                        instruction_text = instruction_match.group(1).strip()
+                        logger.info(f"PACC: Found instructions for {filename} using pattern")
+                        break
+
+                if instruction_text:
                     self._coder_instructions_map[filename] = instruction_text
                 else:
-                    logger.warning(f"PACC: Could not find coder instructions for file: {filename} using markers.")
-                    self._coder_instructions_map[filename] = f"[Error: Instructions not found by parser for {filename}]"
+                    logger.warning(f"PACC: Could not find coder instructions for file: {filename}")
+                    # IMPROVED: Create basic instructions as fallback
+                    fallback_instructions = f"""
+                                         File Purpose: Implementation for {filename}
+                                         Is New File: Yes
+                                         Key Requirements:
+                                         - Implement the main functionality for {filename}
+                                         - Follow Python best practices with type hints and docstrings
+                                         - Include proper error handling
+                                         - Make the code modular and well-structured
+                                         Imports Needed: Standard Python libraries as needed
+                                         IMPORTANT CODER OUTPUT FORMAT: Respond with ONE single Markdown fenced code block: ```python\\nCODE_HERE\\n```. NO other text.
+                                         """
+                    self._coder_instructions_map[filename] = fallback_instructions.strip()
                     missing_instructions_for_files.append(filename)
 
             if missing_instructions_for_files:
-                logger.error(f"PACC: Missing coder instructions for files: {missing_instructions_for_files}")
+                logger.warning(f"PACC: Using fallback instructions for files: {missing_instructions_for_files}")
                 self._log_comm("PACC_Parser",
-                               f"Error: Missing coder instructions for: {', '.join(missing_instructions_for_files)}")
+                               f"Warning: Using fallback instructions for: {', '.join(missing_instructions_for_files)}")
 
             return True
 
@@ -243,10 +307,7 @@ class PlanAndCodeCoordinator(QObject):
                                                   "#61afef", False, 0)
         self._event_bus.uiInputBarBusyStateChanged.emit(True)
 
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_CODERS)
-        self._coder_tasks = []
-        self._active_coder_request_ids = {}
-
+        # FIXED: Don't use asyncio.gather - just start the tasks and let event handlers manage completion
         for filename in self._parsed_files_list:
             instructions = self._coder_instructions_map.get(filename)
             if not instructions or instructions.startswith("[Error:"):
@@ -254,44 +315,71 @@ class PlanAndCodeCoordinator(QObject):
                 self._generated_code_map[filename] = (None, instructions or "Instructions were missing.")
                 continue
 
-            task = asyncio.create_task(self._generate_single_file_code_async(filename, instructions, semaphore))
-            self._coder_tasks.append(task)
+            # Start the code generation task (don't await it)
+            await self._generate_single_file_code_async(filename, instructions)
 
-        if not self._coder_tasks:
-            logger.warning("PACC: No valid coder tasks to run after filtering instructions.")
+        # Check if we have any active coder tasks after starting them all
+        if not self._active_coder_request_ids:
+            logger.warning("PACC: No valid coder tasks were started.")
             self._handle_all_coder_tasks_done()
+
+    async def _generate_single_file_code_async(self, filename: str, instructions: str):
+        # REMOVED: semaphore parameter since we're not using asyncio.gather anymore
+        if not self._specialized_llm_backend_id or not self._specialized_llm_model_name:
+            logger.error("PACC: Specialized LLM details not set. Cannot generate code.")
+            self._generated_code_map[filename] = (None, "Specialized LLM not configured.")
             return
 
-        await asyncio.gather(*self._coder_tasks, return_exceptions=True)
-        self._handle_all_coder_tasks_done()
+        coder_request_id = f"coder_req_{filename.replace('/', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
+        self._active_coder_request_ids[coder_request_id] = filename
 
-    async def _generate_single_file_code_async(self, filename: str, instructions: str, semaphore: asyncio.Semaphore):
-        async with semaphore:
-            if not self._specialized_llm_backend_id or not self._specialized_llm_model_name:
-                logger.error("PACC: Specialized LLM details not set. Cannot generate code.")
-                self._generated_code_map[filename] = (None, "Specialized LLM not configured.")
-                return
+        self._log_comm("PACC->CodeLLM", f"Requesting code for: {filename} (CoderReqID: {coder_request_id})")
 
-            coder_request_id = f"coder_req_{filename.replace('/', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
-            self._active_coder_request_ids[coder_request_id] = filename
+        # Emit system message to chat context
+        self._emit_system_message(f"[System: Code LLM is now generating `{filename}`...]")
 
-            self._log_comm("PACC->CodeLLM", f"Requesting code for: {filename} (CoderReqID: {coder_request_id})")
+        coder_prompt_text = f"Based on the following instructions, generate the complete Python code for the file `{filename}`.\n\n--- INSTRUCTIONS ---\n{instructions}\n--- END INSTRUCTIONS ---"
+        history_for_coder = [ChatMessage(role=USER_ROLE, parts=[coder_prompt_text])]
 
-            # Emit system message to chat context
-            self._emit_system_message(f"[System: Code LLM is now generating `{filename}`...]")
+        self._backend_coordinator.start_llm_streaming_task(
+            request_id=coder_request_id,
+            target_backend_id=self._specialized_llm_backend_id,
+            history_to_send=history_for_coder,
+            is_modification_response_expected=True,
+            options={"temperature": 0.2},
+            request_metadata={"purpose": "plan_and_code_coder", "pacc_request_id": coder_request_id,
+                              "filename": filename}
+        )
 
-            coder_prompt_text = f"Based on the following instructions, generate the complete Python code for the file `{filename}`.\n\n--- INSTRUCTIONS ---\n{instructions}\n--- END INSTRUCTIONS ---"
-            history_for_coder = [ChatMessage(role=USER_ROLE, parts=[coder_prompt_text])]
+        logger.info(f"PACC: Started code generation for {filename} (ReqID: {coder_request_id})")
 
-            self._backend_coordinator.start_llm_streaming_task(
-                request_id=coder_request_id,
-                target_backend_id=self._specialized_llm_backend_id,
-                history_to_send=history_for_coder,
-                is_modification_response_expected=True,
-                options={"temperature": 0.2},
-                request_metadata={"purpose": "plan_and_code_coder", "pacc_request_id": coder_request_id,
-                                  "filename": filename}
-            )
+    def _handle_all_coder_tasks_done(self):
+        logger.info("PACC: All coder tasks have completed (or errored).")
+
+        # Check for any remaining active tasks before proceeding
+        if self._active_coder_request_ids:
+            logger.info(
+                f"PACC: Still have {len(self._active_coder_request_ids)} active coder tasks, not finishing yet.")
+            return
+
+        # Instead of immediately finishing, start validation process
+        successfully_generated_files = []
+
+        for filename in self._parsed_files_list:
+            code, err_msg = self._generated_code_map.get(filename, (None, "Task did not complete or store result."))
+            if code and not err_msg:
+                successfully_generated_files.append(filename)
+                # Write the file to disk for validation
+                self._write_file_to_disk(filename, code)
+
+        if successfully_generated_files:
+            self._log_comm("PACC",
+                           f"Code generation complete. Starting validation for {len(successfully_generated_files)} files...")
+            self._event_bus.uiStatusUpdateGlobal.emit("Code generated. Starting validation...", "#61afef", False, 0)
+            self._validation_queue = successfully_generated_files.copy()
+            self._start_next_validation()
+        else:
+            self._handle_final_completion()
 
     def _handle_all_coder_tasks_done(self):
         logger.info("PACC: All coder tasks have completed (or errored).")
@@ -465,7 +553,13 @@ class PlanAndCodeCoordinator(QObject):
         purpose = usage_stats_dict.get("purpose")
         pacc_internal_req_id = usage_stats_dict.get("pacc_request_id")
 
-        if purpose == "plan_and_code_planner" and request_id == self._active_planning_request_id and pacc_internal_req_id == self._active_planning_request_id:
+        # ADDED: Better logging for debugging
+        logger.info(
+            f"PACC: Processing LLM response - ReqID: {request_id}, Purpose: {purpose}, PACC_ID: {pacc_internal_req_id}")
+        logger.info(f"PACC: Active planner ID: {self._active_planning_request_id}")
+        logger.info(f"PACC: Active coder IDs: {list(self._active_coder_request_ids.keys())}")
+
+        if purpose == "plan_and_code_planner" and request_id == self._active_planning_request_id:
             logger.info(f"PACC: Received PLAN from Planner LLM (ReqID: {request_id})")
             self._current_plan_text = completed_message.text
             self._log_comm("PlannerLLM->PACC", f"Full Plan Received (length {len(self._current_plan_text)} chars)")
@@ -504,30 +598,41 @@ class PlanAndCodeCoordinator(QObject):
                 self._event_bus.uiInputBarBusyStateChanged.emit(False)
                 self._reset_sequence_state()
 
-        elif purpose == "plan_and_code_coder" and request_id == pacc_internal_req_id and request_id in self._active_coder_request_ids:
+        # FIXED: Simplified condition for coder responses
+        elif purpose == "plan_and_code_coder" and request_id in self._active_coder_request_ids:
             filename = self._active_coder_request_ids.get(request_id, "unknown_file")
             logger.info(f"PACC: Received CODE from Code LLM for file '{filename}' (ReqID: {request_id})")
 
             raw_code_response = completed_message.text.strip()
+            logger.info(f"PACC: Raw code response length: {len(raw_code_response)} chars")
 
             code_block_match = re.search(r"```(?:[a-zA-Z0-9_\-\.]*\s*\n)?(.*?)```", raw_code_response,
                                          re.DOTALL | re.IGNORECASE)
             if code_block_match:
                 extracted_code = code_block_match.group(1).strip()
                 self._generated_code_map[filename] = (extracted_code, None)
+                logger.info(f"PACC: Successfully extracted code for {filename} ({len(extracted_code)} chars)")
             else:
-                logger.warning(
-                    f"PACC: Could not extract code block for '{filename}' from Code LLM response. Storing raw. Preview: {raw_code_response[:100]}")
-                self._generated_code_map[filename] = (None,
-                                                      f"Could not extract code block. Raw response: {raw_code_response[:200]}...")
+                logger.warning(f"PACC: Could not extract code block for '{filename}'. Storing raw response.")
+                # Store the raw response instead of failing completely
+                self._generated_code_map[filename] = (raw_code_response, None)
 
-            # Remove handled coder ID, task management is via asyncio.gather
+            # Remove handled coder ID
             if request_id in self._active_coder_request_ids:
                 del self._active_coder_request_ids[request_id]
+
+            # ADDED: Check if all coder tasks are done
+            logger.info(f"PACC: Coder task completed. Remaining active tasks: {len(self._active_coder_request_ids)}")
+            if len(self._active_coder_request_ids) == 0:
+                logger.info("PACC: All coder tasks completed, calling _handle_all_coder_tasks_done")
+                self._handle_all_coder_tasks_done()
+
         else:
             logger.debug(f"PACC: Ignoring completed LLM response for unrelated purpose/ID: {purpose} / {request_id}")
 
     def _handle_llm_errors(self, request_id: str, error_message: str):
+        logger.error(f"PACC: Handling LLM error for ReqID: {request_id}, Error: {error_message}")
+
         if request_id == self._active_planning_request_id:
             logger.error(f"PACC: Error from Planner LLM (ReqID: {request_id}): {error_message}")
             self._log_comm("PlannerLLM Error->PACC", error_message)
@@ -547,6 +652,11 @@ class PlanAndCodeCoordinator(QObject):
             error_message_text = f"[System Error: Code LLM failed for file `{filename}`: {error_message}]"
             self._emit_system_message(error_message_text)
 
-            # Task completion is handled by asyncio.gather, which then calls _handle_all_coder_tasks_done
+            # ADDED: Check if all coder tasks are done (including errored ones)
+            logger.info(f"PACC: Coder task errored. Remaining active tasks: {len(self._active_coder_request_ids)}")
+            if len(self._active_coder_request_ids) == 0:
+                logger.info("PACC: All coder tasks completed (with errors), calling _handle_all_coder_tasks_done")
+                self._handle_all_coder_tasks_done()
+
         else:
             logger.debug(f"PACC: Ignoring LLM error for unrelated request ID: {request_id}")
