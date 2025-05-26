@@ -13,7 +13,7 @@ except ImportError as e:
     logging.getLogger(__name__).error(f"Import error in backend_coordinator: {e}. Using placeholder types.")
     BackendInterface = type("BackendInterface", (object,), {})
     ChatMessage = type("ChatMessage", (object,), {})
-    MODEL_ROLE, USER_ROLE = "model", "user" # CORRECTED: Added MODEL_ROLE and USER_ROLE for ImportError block
+    MODEL_ROLE, USER_ROLE = "model", "user"  # CORRECTED: Added MODEL_ROLE and USER_ROLE for ImportError block
     _dummy_signal = type("Signal", (object,), {"emit": lambda *args, **kwargs: None, "connect": lambda x: None})
     EventBus = type("EventBus", (object,), {  # type: ignore
         "get_instance": lambda: type("DummyBus", (object,), {
@@ -103,7 +103,7 @@ class BackendCoordinator(QObject):
                                   options: Optional[Dict[str, Any]] = None
                                   ) -> Tuple[bool, Optional[str], Optional[str]]:
         self._last_errors_map[target_backend_id] = None
-        err_msg: Optional[str] = None # Initialize error message for clarity
+        err_msg: Optional[str] = None  # Initialize error message for clarity
         adapter = self._backend_adapters.get(target_backend_id)
         if not adapter:
             err_msg = f"Adapter not found for backend_id '{target_backend_id}'."
@@ -119,7 +119,7 @@ class BackendCoordinator(QObject):
 
         request_id = f"llm_req_{uuid.uuid4().hex[:12]}"
         logger.info(f"BC: Generated request ID: {request_id}")  # DEBUG: Log request ID
-        return True, None, request_id # CORRECTED: Changed 'err' to 'None' for successful path
+        return True, None, request_id  # CORRECTED: Changed 'err' to 'None' for successful path
 
     def start_llm_streaming_task(self,
                                  request_id: str,
@@ -169,7 +169,8 @@ class BackendCoordinator(QObject):
                                             request_metadata: Optional[Dict[str, Any]] = None):
         response_buffer = ""
         usage_stats_dict: Dict[str, Any] = {}
-        if request_metadata: usage_stats_dict.update(request_metadata)
+        if request_metadata:
+            usage_stats_dict.update(request_metadata)
         usage_stats_dict["backend_id"] = backend_id
         usage_stats_dict["request_id"] = request_id
 
@@ -189,11 +190,21 @@ class BackendCoordinator(QObject):
 
             stream_iterator = adapter.get_response_stream(history, options)
             chunk_count = 0
+
+            # CRITICAL FIX: Add periodic yielding to prevent GUI blocking
             async for chunk in stream_iterator:
                 chunk_count += 1
                 logger.debug(f"BC: Emitting chunk #{chunk_count} for {request_id}: '{chunk[:30]}...'")  # DEBUG
                 self._event_bus.llmStreamChunkReceived.emit(request_id, chunk)
                 response_buffer += chunk
+
+                # CRITICAL: Yield control back to Qt event loop every few chunks
+                if chunk_count % 5 == 0:  # Every 5 chunks
+                    await asyncio.sleep(0)  # Yield to event loop
+
+                # Additional safety: yield on long chunks
+                if len(chunk) > 100:
+                    await asyncio.sleep(0)
 
             logger.info(f"BC: Stream completed for {request_id}, total chunks: {chunk_count}")  # DEBUG
 
@@ -213,6 +224,7 @@ class BackendCoordinator(QObject):
                 empty_msg_text = "[AI returned an empty response]"
                 empty_message = ChatMessage(id=request_id, role=MODEL_ROLE, parts=[empty_msg_text])  # type: ignore
                 self._event_bus.llmResponseCompleted.emit(request_id, empty_message, usage_stats_dict)
+
         except asyncio.CancelledError:
             logger.info(f"BC: Stream cancelled for {request_id}")  # DEBUG
             self._event_bus.llmResponseError.emit(request_id, "[AI response cancelled by user]")
@@ -230,12 +242,12 @@ class BackendCoordinator(QObject):
             task = self._active_backend_tasks.get(request_id)
             if task and not task.done():
                 task.cancel()
-                self._update_overall_busy_state() # Ensure busy state updated on single cancellation
+                self._update_overall_busy_state()  # Ensure busy state updated on single cancellation
         else:  # Cancel ALL tasks if no specific request_id
             for req_id_key, task_to_cancel in list(self._active_backend_tasks.items()):
                 if task_to_cancel and not task_to_cancel.done():
                     task_to_cancel.cancel()
-            self._update_overall_busy_state() # Ensure busy state updated on mass cancellation
+            self._update_overall_busy_state()  # Ensure busy state updated on mass cancellation
 
     def is_backend_configured(self, backend_id: str) -> bool:
         return self._is_configured_map.get(backend_id, False)
