@@ -356,7 +356,13 @@ class MainWindow(QWidget):
             self.active_chat_input_bar.handle_busy_state(is_input_bar_busy)
         if self.left_panel:
             api_ready = self.chat_manager.is_api_ready() if self.chat_manager else False
-            self.left_panel.set_enabled_state(enabled=api_ready, is_busy=is_input_bar_busy)
+            rag_ready = self.chat_manager.is_rag_ready() if self.chat_manager else False
+            # FIX: Use correct parameter names for set_enabled_state
+            self.left_panel.set_enabled_state(
+                is_api_ready=api_ready,
+                is_busy=is_input_bar_busy,
+                is_rag_ready=rag_ready
+            )
 
     @Slot(str, str, bool, list)
     def _handle_backend_configuration_changed_event(self, backend_id: str, model_name: str, is_configured: bool,

@@ -54,7 +54,17 @@ class LlmTerminalWindow(QWidget):
     @Slot(str)
     def add_log_entry(self, html_text: str):
         if self._log_text_edit:
-            self._log_text_edit.appendHtml(html_text)
+            # FIX: Use insertHtml instead of appendHtml (which doesn't exist)
+            cursor = self._log_text_edit.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self._log_text_edit.setTextCursor(cursor)
+            self._log_text_edit.insertHtml(html_text)
+            self._log_text_edit.insertHtml("<br>")  # Add line break
+
+            # Auto-scroll to bottom
+            scrollbar = self._log_text_edit.verticalScrollBar()
+            if scrollbar:
+                scrollbar.setValue(scrollbar.maximum())
         else:
             logger.warning("LlmTerminalWindow: _log_text_edit is None, cannot add log entry.")
 
@@ -70,4 +80,3 @@ class LlmTerminalWindow(QWidget):
         logger.debug("LlmTerminalWindow closeEvent: Hiding window.")
         self.hide()
         event.ignore()
-
