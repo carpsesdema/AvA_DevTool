@@ -40,13 +40,16 @@ class PlanAndCodeCoordinator(QObject):
         self._coder_instructions_map: Dict[str, str] = {}
         self._generated_code_map: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
 
-        # NEW: Terminal validation tracking
+        # Terminal validation tracking
         self._validation_retry_count: Dict[str, int] = {}
         self._pending_validation_commands: Dict[str, str] = {}  # command_id -> filename
         self._validation_queue: List[str] = []  # filenames to validate
         self._current_validation_file: Optional[str] = None
         self._project_files_dir: Optional[str] = None
 
+        # Context tracking for better integration
+        self._current_project_id: Optional[str] = None
+        self._current_session_id: Optional[str] = None
         self._original_user_query: Optional[str] = None
         self._specialized_llm_backend_id: Optional[str] = None
         self._specialized_llm_model_name: Optional[str] = None
@@ -54,7 +57,7 @@ class PlanAndCodeCoordinator(QObject):
         self._event_bus.llmResponseCompleted.connect(self._handle_llm_responses)
         self._event_bus.llmResponseError.connect(self._handle_llm_errors)
 
-        # NEW: Connect terminal signals for validation
+        # Connect terminal signals for validation
         self._event_bus.terminalCommandCompleted.connect(self._handle_terminal_command_completed)
         self._event_bus.terminalCommandError.connect(self._handle_terminal_command_error)
 
@@ -66,6 +69,19 @@ class PlanAndCodeCoordinator(QObject):
         else:
             logger.info(f"PACC_LOG_FALLBACK: [{sender}] {message[:150]}...")
 
+    def _emit_system_message(self, message: str):
+        """Emit a system message to the current chat context"""
+        if self._current_project_id and self._current_session_id:
+            system_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE, parts=[message])
+            self._event_bus.newMessageAddedToHistory.emit(
+                self._current_project_id,
+                self._current_session_id,
+                system_msg
+            )
+        else:
+            # Fallback for when we don't have project context
+            logger.info(f"PACC System Message: {message}")
+
     def start_planning_sequence(self,
                                 user_query: str,
                                 planner_llm_backend_id: str,
@@ -73,7 +89,9 @@ class PlanAndCodeCoordinator(QObject):
                                 planner_llm_temperature: float,
                                 specialized_llm_backend_id: str,
                                 specialized_llm_model_name: str,
-                                project_files_dir: Optional[str] = None):
+                                project_files_dir: Optional[str] = None,
+                                project_id: Optional[str] = None,  # NEW
+                                session_id: Optional[str] = None):  # NEW
         if self._active_planning_request_id or self._active_coder_request_ids:
             logger.warning("Planning or coding sequence already active. Ignoring new request.")
             self._event_bus.uiStatusUpdateGlobal.emit("Coordinator is already working on a task!", "#e5c07b", True,
@@ -84,6 +102,10 @@ class PlanAndCodeCoordinator(QObject):
         self._specialized_llm_backend_id = specialized_llm_backend_id
         self._specialized_llm_model_name = specialized_llm_model_name
         self._project_files_dir = project_files_dir or os.getcwd()
+
+        # NEW: Store project context
+        self._current_project_id = project_id
+        self._current_session_id = session_id
 
         # Reset all state
         self._current_plan_text = None
@@ -120,6 +142,7 @@ class PlanAndCodeCoordinator(QObject):
         prompt_parts = [
             "You are an expert AI system planner and technical architect. Your task is to prepare a comprehensive plan and highly detailed instructions for a separate Coder AI to implement a user's request.",
             f"The user's request is: \"{user_query}\"",
+            f"\nProject directory: {self._project_files_dir}",
             "\nYour response MUST be structured as follows:",
             "1.  **Overall Design Philosophy:** Briefly (1-2 sentences) describe the approach for the project structure and main components.",
             "2.  **Files Planned:** A Python list of relative file paths that need to be created. (e.g., FILES_PLANNED: ['src/main.py', 'src/utils.py', 'templates/index.html'])",
@@ -253,9 +276,9 @@ class PlanAndCodeCoordinator(QObject):
             self._active_coder_request_ids[coder_request_id] = filename
 
             self._log_comm("PACC->CodeLLM", f"Requesting code for: {filename} (CoderReqID: {coder_request_id})")
-            system_message = ChatMessage(role=SYSTEM_ROLE,
-                                         parts=[f"[System: Code LLM is now generating `{filename}`...]"])
-            self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", system_message)
+
+            # Emit system message to chat context
+            self._emit_system_message(f"[System: Code LLM is now generating `{filename}`...]")
 
             coder_prompt_text = f"Based on the following instructions, generate the complete Python code for the file `{filename}`.\n\n--- INSTRUCTIONS ---\n{instructions}\n--- END INSTRUCTIONS ---"
             history_for_coder = [ChatMessage(role=USER_ROLE, parts=[coder_prompt_text])]
@@ -273,7 +296,7 @@ class PlanAndCodeCoordinator(QObject):
     def _handle_all_coder_tasks_done(self):
         logger.info("PACC: All coder tasks have completed (or errored).")
 
-        # NEW: Instead of immediately finishing, start validation process
+        # Instead of immediately finishing, start validation process
         successfully_generated_files = []
 
         for filename in self._parsed_files_list:
@@ -408,8 +431,9 @@ class PlanAndCodeCoordinator(QObject):
             summary_message_parts.append(f"Failed for: {failed_details}.")
 
         final_status_msg = " ".join(summary_message_parts)
-        result_message = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE, parts=[final_status_msg])
-        self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", result_message)
+
+        # Emit to proper chat context
+        self._emit_system_message(final_status_msg)
 
         self._event_bus.uiStatusUpdateGlobal.emit(
             f"Autonomous coding finished. Success: {len(successful_files)}, Failed: {len(failed_files_with_errors)}",
@@ -433,6 +457,8 @@ class PlanAndCodeCoordinator(QObject):
         self._validation_queue = []
         self._current_validation_file = None
         self._project_files_dir = None
+        self._current_project_id = None  # NEW
+        self._current_session_id = None  # NEW
         logger.info("PACC: Sequence state has been reset.")
 
     def _handle_llm_responses(self, request_id: str, completed_message: ChatMessage, usage_stats_dict: dict):
@@ -469,12 +495,11 @@ class PlanAndCodeCoordinator(QObject):
                         self._event_bus.uiInputBarBusyStateChanged.emit(False)
                         self._reset_sequence_state()
 
-                    plan_summary_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE, parts=[msg_text])
-                    self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", plan_summary_msg)
+                    # Emit to proper chat context
+                    self._emit_system_message(msg_text)
             else:
                 err_msg_text = f"[System Error: Failed to parse the plan from Planner LLM for '{self._original_user_query[:50]}...'. Please check LLM logs or try rephrasing.]"
-                error_message = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[err_msg_text])
-                self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", error_message)
+                self._emit_system_message(err_msg_text)
                 self._event_bus.uiStatusUpdateGlobal.emit("Failed to parse plan.", "#e06c75", False, 0)
                 self._event_bus.uiInputBarBusyStateChanged.emit(False)
                 self._reset_sequence_state()
@@ -508,8 +533,7 @@ class PlanAndCodeCoordinator(QObject):
             self._log_comm("PlannerLLM Error->PACC", error_message)
 
             error_message_text = f"[System Error: Planner LLM failed to generate a plan for '{self._original_user_query[:50]}...': {error_message}]"
-            err_msg = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[error_message_text])
-            self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", err_msg)
+            self._emit_system_message(error_message_text)
 
             self._event_bus.uiStatusUpdateGlobal.emit("Planner LLM error. Unable to create plan.", "#e06c75", False, 0)
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
@@ -521,8 +545,7 @@ class PlanAndCodeCoordinator(QObject):
             self._generated_code_map[filename] = (None, error_message)
 
             error_message_text = f"[System Error: Code LLM failed for file `{filename}`: {error_message}]"
-            err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[error_message_text])
-            self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", err_msg_obj)
+            self._emit_system_message(error_message_text)
 
             # Task completion is handled by asyncio.gather, which then calls _handle_all_coder_tasks_done
         else:

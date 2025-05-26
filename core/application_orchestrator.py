@@ -13,17 +13,19 @@ try:
     from core.event_bus import EventBus
     from services.llm_communication_logger import LlmCommunicationLogger
     from services.upload_service import UploadService
-    from services.terminal_service import TerminalService  # NEW
+    from services.terminal_service import TerminalService
     from core.rag_handler import RagHandler
     from utils import constants
     from services.project_service import ProjectManager, Project, ChatSession
     from core.models import ChatMessage
+    from ui.dialogs.code_viewer_dialog import CodeViewerWindow  # NEW
 except ImportError as e:
     ProjectManager = type("ProjectManager", (object,), {})  # type: ignore
     ChatMessage = type("ChatMessage", (object,), {})  # type: ignore
     UploadService = type("UploadService", (object,), {})  # type: ignore
     RagHandler = type("RagHandler", (object,), {})  # type: ignore
     TerminalService = type("TerminalService", (object,), {})  # type: ignore
+    CodeViewerWindow = type("CodeViewerWindow", (object,), {})  # type: ignore
     logging.getLogger(__name__).critical(f"Critical import error in ApplicationOrchestrator: {e}", exc_info=True)
     raise
 
@@ -51,7 +53,7 @@ class ApplicationOrchestrator(QObject):
             logger.critical("ApplicationOrchestrator requires a valid ProjectManager.")
             raise TypeError("ApplicationOrchestrator requires a valid ProjectManager.")
 
-        self.chat_manager: Optional['ChatManager'] = None  # Use string literal for type hint
+        self.chat_manager: Optional = None  # Removed type hint to avoid circular import
 
         # --- LLM Backend Adapters ---
         self.gemini_chat_adapter = GeminiAdapter()
@@ -90,7 +92,8 @@ class ApplicationOrchestrator(QObject):
 
         try:
             self.upload_service = UploadService()
-            vector_db_service = getattr(self.upload_service, '_vector_db_service', None) if self.upload_service else None
+            vector_db_service = getattr(self.upload_service, '_vector_db_service',
+                                        None) if self.upload_service else None
             self.rag_handler = RagHandler(self.upload_service, vector_db_service)
             logger.info("RAG services initialized successfully")
         except Exception as e_rag:
@@ -98,14 +101,24 @@ class ApplicationOrchestrator(QObject):
             self.upload_service = None
             self.rag_handler = None
 
-        # --- NEW: Terminal Service ---
+        # --- Terminal Service ---
         self.terminal_service = None
         try:
             self.terminal_service = TerminalService(parent=self)
             logger.info("TerminalService initialized successfully")
         except Exception as e_terminal:
-            logger.error(f"Failed to initialize TerminalService: {e_terminal}. Terminal functionality will be disabled.")
+            logger.error(
+                f"Failed to initialize TerminalService: {e_terminal}. Terminal functionality will be disabled.")
             self.terminal_service = None
+
+        # --- NEW: Code Viewer Dialog ---
+        self.code_viewer_window = None
+        try:
+            self.code_viewer_window = CodeViewerWindow(parent=None)  # No parent so it can be independent
+            logger.info("CodeViewerWindow initialized successfully")
+        except Exception as e_code_viewer:
+            logger.error(f"Failed to initialize CodeViewerWindow: {e_code_viewer}. Code viewer will be disabled.")
+            self.code_viewer_window = None
 
         # --- LLM Communication Logger ---
         self.llm_communication_logger: Optional[LlmCommunicationLogger] = None
@@ -114,10 +127,28 @@ class ApplicationOrchestrator(QObject):
         except Exception as e_logger:
             logger.error(f"Failed to instantiate LlmCommunicationLogger: {e_logger}", exc_info=True)
 
+        # --- NEW: LLM Terminal Window ---
+        self.llm_terminal_window = None
+        try:
+            from ui.dialogs.llm_terminal_window import LlmTerminalWindow
+            self.llm_terminal_window = LlmTerminalWindow(parent=None)  # Independent window
+
+            # Connect LLM communication logger to terminal window
+            if self.llm_communication_logger and self.llm_terminal_window:
+                self.llm_communication_logger.new_terminal_log_entry.connect(
+                    self.llm_terminal_window.add_log_entry
+                )
+
+            logger.info("LlmTerminalWindow initialized and connected successfully")
+        except Exception as e_terminal_window:
+            logger.error(
+                f"Failed to initialize LlmTerminalWindow: {e_terminal_window}. LLM logging window will be disabled.")
+            self.llm_terminal_window = None
+
         self._connect_event_bus()
         logger.info("ApplicationOrchestrator initialization complete.")
 
-    def set_chat_manager(self, chat_manager: 'ChatManager'):  # Use string literal
+    def set_chat_manager(self, chat_manager):  # Removed type hint to avoid circular import
         """Allows ChatManager instance to be set after mutual creation."""
         self.chat_manager = chat_manager
 
@@ -125,10 +156,119 @@ class ApplicationOrchestrator(QObject):
         self.event_bus.createNewSessionForProjectRequested.connect(self._handle_create_new_session_requested)
         self.event_bus.createNewProjectRequested.connect(self._handle_create_new_project_requested)
         self.event_bus.messageFinalizedForSession.connect(self._handle_message_finalized_for_session_persistence)
+
+        # NEW: Connect code viewer related signals
+        self.event_bus.viewCodeViewerRequested.connect(self._handle_view_code_viewer_requested)
+        self.event_bus.modificationFileReadyForDisplay.connect(self._handle_modification_file_ready_for_display)
+        self.event_bus.applyFileChangeRequested.connect(self._handle_apply_file_change_requested)
+
+        # NEW: Connect LLM terminal window signal
+        self.event_bus.showLlmLogWindowRequested.connect(self._handle_show_llm_log_window_requested)
+
+        # Connect code viewer's apply signal to event bus
+        if self.code_viewer_window:
+            self.code_viewer_window.apply_change_requested.connect(
+                lambda project_id, filepath, content, focus_prefix:
+                self.event_bus.applyFileChangeRequested.emit(project_id, filepath, content, focus_prefix)
+            )
+
         if hasattr(self.project_manager, 'projectDeleted'):
             self.project_manager.projectDeleted.connect(self._handle_project_deleted)  # type: ignore
         else:
             logger.warning("ProjectManager does not have projectDeleted signal. Cannot connect in Orchestrator.")
+
+    @Slot()
+    def _handle_show_llm_log_window_requested(self):
+        """Handle request to show the LLM communication log window"""
+        if self.llm_terminal_window:
+            self.llm_terminal_window.show()
+            self.llm_terminal_window.activateWindow()
+            self.llm_terminal_window.raise_()
+            logger.info("LLM terminal window shown")
+        else:
+            logger.error("LLM terminal window not available")
+            self.event_bus.uiErrorGlobal.emit("LLM communication log not available", False)
+
+    @Slot()
+    def _handle_view_code_viewer_requested(self):
+        """Handle request to show the code viewer window"""
+        if self.code_viewer_window:
+            self.code_viewer_window.show()
+            self.code_viewer_window.activateWindow()
+            self.code_viewer_window.raise_()
+            logger.info("Code viewer window shown")
+        else:
+            logger.error("Code viewer window not available")
+            self.event_bus.uiErrorGlobal.emit("Code viewer not available", False)
+
+    @Slot(str, str)
+    def _handle_modification_file_ready_for_display(self, filename: str, content: str):
+        """Handle when a file is ready to be displayed in the code viewer"""
+        if not self.code_viewer_window:
+            logger.error("Code viewer window not available for displaying file")
+            return
+
+        # Get current project context for apply functionality
+        current_project_id = None
+        if self.chat_manager:
+            current_project_id = self.chat_manager.get_current_project_id()
+
+        # Show the generated file in the code viewer
+        self.code_viewer_window.update_or_add_file(
+            filename=filename,
+            content=content,
+            is_ai_modification=True,
+            original_content=None,  # For new files, no original content
+            project_id_for_apply=current_project_id,
+            focus_prefix_for_apply=self._get_current_project_directory()
+        )
+
+        logger.info(f"File '{filename}' displayed in code viewer")
+
+    @Slot(str, str, str, str)
+    def _handle_apply_file_change_requested(self, project_id: str, relative_filepath: str, new_content: str,
+                                            focus_prefix: str):
+        """Handle request to apply/save a file change to disk"""
+        import os
+
+        try:
+            # Determine the full path for the file
+            if focus_prefix and os.path.isabs(focus_prefix):
+                full_path = os.path.join(focus_prefix, relative_filepath)
+            else:
+                # Use current working directory or project directory
+                project_dir = self._get_current_project_directory()
+                full_path = os.path.join(project_dir, relative_filepath)
+
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+            # Write the file
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+
+            logger.info(f"Successfully applied file change: {full_path}")
+            self.event_bus.uiStatusUpdateGlobal.emit(
+                f"File saved: {os.path.basename(relative_filepath)}",
+                "#98c379",
+                True,
+                3000
+            )
+
+            # Notify code viewer that apply completed
+            if self.code_viewer_window:
+                self.code_viewer_window.handle_apply_completed(relative_filepath)
+
+        except Exception as e:
+            logger.error(f"Error applying file change for {relative_filepath}: {e}")
+            self.event_bus.uiErrorGlobal.emit(f"Failed to save file: {str(e)}", False)
+
+    def _get_current_project_directory(self) -> str:
+        """Get the current project's working directory"""
+        # For now, return current working directory
+        # This could be enhanced to use project-specific directories
+        import os
+        return os.getcwd()
 
     def initialize_application_state(self):
         logger.info("Orchestrator: Initializing application state (project/session)...")
@@ -299,3 +439,11 @@ class ApplicationOrchestrator(QObject):
     def get_terminal_service(self) -> TerminalService:  # NEW GETTER
         """Returns the initialized TerminalService instance."""
         return self.terminal_service
+
+    def get_code_viewer_window(self) -> Optional[CodeViewerWindow]:  # NEW GETTER
+        """Returns the initialized CodeViewerWindow instance."""
+        return self.code_viewer_window
+
+    def get_llm_terminal_window(self):  # NEW GETTER
+        """Returns the initialized LlmTerminalWindow instance."""
+        return self.llm_terminal_window
