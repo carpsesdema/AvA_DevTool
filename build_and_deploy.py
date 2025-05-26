@@ -46,9 +46,9 @@ class AvaBuilder:
         self.releases_dir = self.project_root / "releases"
 
         # GitHub configuration - UPDATE THESE!
-        self.github_token = os.getenv('GITHUB_TOKEN')
+        self.github_token = os.getenv('GITHUB_TOKEN2')
         # IMPORTANT: Update this to your AvA project's GitHub repository!
-        self.github_repo = os.getenv('GITHUB_REPO', 'carpsesdema/AvA_DevTool')
+        self.github_repo = os.getenv('GITHUB_REPO2', 'carpsesdema/AvA_DevTool')
 
         # Application details
         self.app_name = "AvA_DevTool"  # Name for the executable

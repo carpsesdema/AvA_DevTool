@@ -6,7 +6,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 APP_NAME = "AvA: PySide6 Rebuild"
-APP_VERSION = "0.1.0-Phase1"
+APP_VERSION = "1.0.0"
 
 
 DEFAULT_CHAT_BACKEND_ID = "models/gemini-2.5-flash-preview-05-20"
