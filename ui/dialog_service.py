@@ -11,8 +11,11 @@ try:
     from ui.dialogs.llm_terminal_window import LlmTerminalWindow
     from ui.dialogs.personality_dialog import EditPersonalityDialog
     from ui.dialogs.code_viewer_dialog import CodeViewerWindow
-    # MODIFICATION: Import the new ProjectRagDialog
     from ui.dialogs.project_rag_dialog import ProjectRagDialog
+    # NEW: Add update dialog imports
+    from ui.dialogs.update_dialog import UpdateDialog
+    from services.update_service import UpdateInfo
+    from utils import constants
 except ImportError as e_ds:
     logging.getLogger(__name__).critical(f"Critical import error in DialogService: {e_ds}", exc_info=True)
     raise
@@ -37,7 +40,8 @@ class DialogService(QObject):
 
         self._llm_terminal_window: Optional[LlmTerminalWindow] = None
         self._code_viewer_window: Optional[CodeViewerWindow] = None
-        self._project_rag_dialog: Optional[ProjectRagDialog] = None  # MODIFICATION: Add instance variable
+        self._project_rag_dialog: Optional[ProjectRagDialog] = None
+        self._update_dialog: Optional[UpdateDialog] = None  # NEW: Add update dialog instance
 
         self._connect_event_bus_subscriptions_phase1()
         logger.info("DialogService (Phase 1) initialized and connected to EventBus.")
@@ -48,12 +52,11 @@ class DialogService(QObject):
         bus.chatLlmPersonalityEditRequested.connect(self.trigger_edit_personality_dialog)
         bus.viewCodeViewerRequested.connect(lambda: self.show_code_viewer(ensure_creation=True))
         bus.showProjectRagDialogRequested.connect(self.trigger_show_project_rag_dialog)
-        # MODIFICATION: Add subscription to show Project RAG Dialog
-        # This signal will be emitted by LeftControlPanel's button
-        # An alternative would be for LeftControlPanel to call a method on DialogService directly.
-        # For now, let's assume an event `showProjectRagDialogRequested` which needs to be added to EventBus.
-        # Or, more simply, LeftPanel will call `trigger_show_project_rag_dialog` directly.
-        # Let's assume direct call for now, so no new event bus connection here for *triggering* it.
+
+        # NEW: Connect update-related signals
+        bus.updateAvailable.connect(self.show_update_dialog)
+        bus.noUpdateAvailable.connect(self._handle_no_update_available)
+        bus.updateCheckFailed.connect(self._handle_update_check_failed)
 
     def show_llm_terminal_window(self, ensure_creation: bool = True) -> Optional[LlmTerminalWindow]:
         logger.debug(f"DialogService: Request to show LLM terminal window (ensure_creation={ensure_creation}).")
@@ -128,7 +131,6 @@ class DialogService(QObject):
             QMessageBox.critical(self.parent_window, "Dialog Error",
                                  f"Could not open Personality Editor:\n{e_pers_dlg}")
 
-    # MODIFICATION: New method to show the Project RAG Dialog
     @Slot()
     def trigger_show_project_rag_dialog(self):
         logger.debug("DialogService: Request to show Project RAG File Add dialog.")
@@ -146,46 +148,101 @@ class DialogService(QObject):
             return
 
         try:
-            # We can reuse the dialog instance or create a new one each time.
-            # For modal dialogs that don't retain much state beyond the call, creating new is often cleaner.
             self._project_rag_dialog = ProjectRagDialog(
                 project_id=current_project.id,
                 project_name=current_project.name,
                 parent=self.parent_window
             )
             logger.info(f"DialogService: Created/Reused ProjectRagDialog for project '{current_project.name}'.")
-
-            # exec_() is blocking, dialog handles emitting signal if files are confirmed
             self._project_rag_dialog.exec()
-            # No need to check result here, dialog emits event on accept.
 
         except Exception as e_pr_dlg:
             logger.error(f"Error showing ProjectRagDialog: {e_pr_dlg}", exc_info=True)
             QMessageBox.critical(self.parent_window, "Dialog Error",
                                  f"Could not open Project RAG File Dialog:\n{e_pr_dlg}")
 
+    # NEW: Update dialog methods
+    @Slot(object)
+    def show_update_dialog(self, update_info: UpdateInfo):
+        """Show the update dialog when an update is available"""
+        logger.info(f"Showing update dialog for version {update_info.version}")
+
+        try:
+            # Close existing dialog if open
+            if self._update_dialog and self._update_dialog.isVisible():
+                self._update_dialog.close()
+
+            # Create new update dialog
+            self._update_dialog = UpdateDialog(update_info, parent=self.parent_window)
+
+            # Connect dialog signals to event bus
+            self._update_dialog.download_requested.connect(
+                lambda info: self._event_bus.updateDownloadRequested.emit(info)
+            )
+            self._update_dialog.install_requested.connect(
+                lambda path: self._event_bus.updateInstallRequested.emit(path)
+            )
+            self._update_dialog.restart_requested.connect(
+                lambda: self._event_bus.applicationRestartRequested.emit()
+            )
+
+            # Connect progress signals
+            self._event_bus.updateProgress.connect(self._update_dialog.update_progress)
+            self._event_bus.updateStatusChanged.connect(self._update_dialog.update_status)
+            self._event_bus.updateDownloaded.connect(self._update_dialog.download_completed)
+            self._event_bus.updateDownloadFailed.connect(self._update_dialog.download_failed)
+
+            # Show the dialog
+            self._update_dialog.show()
+            self._update_dialog.activateWindow()
+            self._update_dialog.raise_()
+
+        except Exception as e:
+            logger.error(f"Error showing update dialog: {e}", exc_info=True)
+            QMessageBox.critical(self.parent_window, "Dialog Error", f"Could not show update dialog:\n{e}")
+
+    @Slot()
+    def _handle_no_update_available(self):
+        """Handle when no update is available"""
+        logger.info("No update available")
+        QMessageBox.information(
+            self.parent_window,
+            "No Updates Available",
+            f"You are running the latest version of {constants.APP_NAME}.\n\n"
+            f"Current version: {constants.APP_VERSION}"
+        )
+
+    @Slot(str)
+    def _handle_update_check_failed(self, error_message: str):
+        """Handle update check failure"""
+        logger.error(f"Update check failed: {error_message}")
+        QMessageBox.warning(
+            self.parent_window,
+            "Update Check Failed",
+            f"Could not check for updates:\n{error_message}\n\n"
+            "Please check your internet connection and try again."
+        )
+
     def close_non_modal_dialogs(self):
         logger.info("DialogService attempting to close non-modal dialogs.")
         if self._llm_terminal_window and self._llm_terminal_window.isVisible():
             try:
-                self._llm_terminal_window.close()  # close() on QWidget hides it by default
+                self._llm_terminal_window.close()
                 logger.debug("  LLM Terminal window close requested.")
             except Exception as e_close_llm:
                 logger.error(f"Error closing LlmTerminalWindow: {e_close_llm}")
 
         if self._code_viewer_window and self._code_viewer_window.isVisible():
             try:
-                self._code_viewer_window.close()  # close() on QWidget hides it by default
+                self._code_viewer_window.close()
                 logger.debug("  Code Viewer window close requested.")
             except Exception as e_close_cv:
                 logger.error(f"Error closing CodeViewerWindow: {e_close_cv}")
 
-        # ProjectRagDialog is modal (uses exec()), so it doesn't need to be in close_non_modal_dialogs.
-        # If it were non-modal, we'd add:
-        # if self._project_rag_dialog and self._project_rag_dialog.isVisible():
-        #     try:
-        #         self._project_rag_dialog.close()
-        #         logger.debug("  Project RAG Dialog close requested.")
-        #     except Exception as e_close_prd:
-        #         logger.error(f"Error closing ProjectRagDialog: {e_close_prd}")
-
+        # NEW: Close update dialog if open
+        if self._update_dialog and self._update_dialog.isVisible():
+            try:
+                self._update_dialog.close()
+                logger.debug("  Update dialog close requested.")
+            except Exception as e_close_update:
+                logger.error(f"Error closing UpdateDialog: {e_close_update}")

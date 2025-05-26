@@ -71,6 +71,19 @@ class EventBus(QObject):
     modificationFileReadyForDisplay = Signal(str, str) # filename, content
     applyFileChangeRequested = Signal(str, str, str, str) # project_id, relative_filepath, new_content, focus_prefix
 
+    # Update System Signals
+    checkForUpdatesRequested = Signal()
+    updateAvailable = Signal(object)  # UpdateInfo
+    noUpdateAvailable = Signal()
+    updateCheckFailed = Signal(str)
+    updateDownloadRequested = Signal(object)
+    updateDownloaded = Signal(str)
+    updateDownloadFailed = Signal(str)
+    updateInstallRequested = Signal(str)
+    updateProgress = Signal(int)
+    updateStatusChanged = Signal(str)
+    applicationRestartRequested = Signal()
+
     @staticmethod
     def get_instance() -> 'EventBus':
         if EventBus._instance is None:
