@@ -111,7 +111,7 @@ class ApplicationOrchestrator(QObject):
                 f"Failed to initialize TerminalService: {e_terminal}. Terminal functionality will be disabled.")
             self.terminal_service = None
 
-        # --- NEW: Code Viewer Dialog ---
+        # --- Code Viewer Dialog ---
         self.code_viewer_window = None
         try:
             self.code_viewer_window = CodeViewerWindow(parent=None)  # No parent so it can be independent
@@ -127,24 +127,6 @@ class ApplicationOrchestrator(QObject):
         except Exception as e_logger:
             logger.error(f"Failed to instantiate LlmCommunicationLogger: {e_logger}", exc_info=True)
 
-        # --- NEW: LLM Terminal Window ---
-        self.llm_terminal_window = None
-        try:
-            from ui.dialogs.llm_terminal_window import LlmTerminalWindow
-            self.llm_terminal_window = LlmTerminalWindow(parent=None)  # Independent window
-
-            # Connect LLM communication logger to terminal window
-            if self.llm_communication_logger and self.llm_terminal_window:
-                self.llm_communication_logger.new_terminal_log_entry.connect(
-                    self.llm_terminal_window.add_log_entry
-                )
-
-            logger.info("LlmTerminalWindow initialized and connected successfully")
-        except Exception as e_terminal_window:
-            logger.error(
-                f"Failed to initialize LlmTerminalWindow: {e_terminal_window}. LLM logging window will be disabled.")
-            self.llm_terminal_window = None
-
         self._connect_event_bus()
         logger.info("ApplicationOrchestrator initialization complete.")
 
@@ -157,13 +139,10 @@ class ApplicationOrchestrator(QObject):
         self.event_bus.createNewProjectRequested.connect(self._handle_create_new_project_requested)
         self.event_bus.messageFinalizedForSession.connect(self._handle_message_finalized_for_session_persistence)
 
-        # NEW: Connect code viewer related signals
+        # Connect code viewer related signals
         self.event_bus.viewCodeViewerRequested.connect(self._handle_view_code_viewer_requested)
         self.event_bus.modificationFileReadyForDisplay.connect(self._handle_modification_file_ready_for_display)
         self.event_bus.applyFileChangeRequested.connect(self._handle_apply_file_change_requested)
-
-        # NEW: Connect LLM terminal window signal
-        self.event_bus.showLlmLogWindowRequested.connect(self._handle_show_llm_log_window_requested)
 
         # Connect code viewer's apply signal to event bus
         if self.code_viewer_window:
@@ -176,18 +155,6 @@ class ApplicationOrchestrator(QObject):
             self.project_manager.projectDeleted.connect(self._handle_project_deleted)  # type: ignore
         else:
             logger.warning("ProjectManager does not have projectDeleted signal. Cannot connect in Orchestrator.")
-
-    @Slot()
-    def _handle_show_llm_log_window_requested(self):
-        """Handle request to show the LLM communication log window"""
-        if self.llm_terminal_window:
-            self.llm_terminal_window.show()
-            self.llm_terminal_window.activateWindow()
-            self.llm_terminal_window.raise_()
-            logger.info("LLM terminal window shown")
-        else:
-            logger.error("LLM terminal window not available")
-            self.event_bus.uiErrorGlobal.emit("LLM communication log not available", False)
 
     @Slot()
     def _handle_view_code_viewer_requested(self):
@@ -443,7 +410,3 @@ class ApplicationOrchestrator(QObject):
     def get_code_viewer_window(self) -> Optional[CodeViewerWindow]:  # NEW GETTER
         """Returns the initialized CodeViewerWindow instance."""
         return self.code_viewer_window
-
-    def get_llm_terminal_window(self):  # NEW GETTER
-        """Returns the initialized LlmTerminalWindow instance."""
-        return self.llm_terminal_window
