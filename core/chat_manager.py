@@ -1,4 +1,5 @@
-# core/chat_manager.py
+# core/chat_manager.py - Key fixes for async RAG and auto LLM terminal
+import asyncio
 import logging
 import os
 import uuid
@@ -83,6 +84,9 @@ class ChatManager(QObject):
         # NEW: File creation tracking
         self._file_creation_request_ids: Dict[str, str] = {}  # request_id -> filename
 
+        # NEW: LLM terminal auto-open tracking
+        self._llm_terminal_opened: bool = False
+
         self._connect_event_bus_subscriptions()
         logger.info("ChatManager initialized and subscriptions connected.")
 
@@ -142,6 +146,12 @@ class ChatManager(QObject):
         if self._llm_comm_logger:
             log_prefix = f"[P:{self._current_project_id[:6]}/S:{self._current_session_id[:6]}]" if self._current_project_id and self._current_session_id else "[NoActiveSession]"
             self._llm_comm_logger.log_message(f"{log_prefix} {sender}", message)
+
+            # NEW: Auto-open LLM terminal on first log message if not already opened
+            if not self._llm_terminal_opened:
+                self._llm_terminal_opened = True
+                logger.info("ChatManager: Auto-opening LLM terminal for first communication")
+                self._event_bus.showLlmLogWindowRequested.emit()
         else:
             logger.info(f"LLM_COMM_LOG_FALLBACK: [{sender}] {message[:150]}...")
 
@@ -265,7 +275,7 @@ Make the code production-ready and well-structured."""
         self._log_llm_comm("USER", user_msg_txt)
 
         if processed_input.intent == UserInputIntent.NORMAL_CHAT:
-            self._handle_normal_chat(user_msg_txt, image_data)
+            asyncio.create_task(self._handle_normal_chat_async(user_msg_txt, image_data))
         elif processed_input.intent == UserInputIntent.FILE_CREATION_REQUEST:
             self._handle_file_creation_request(user_msg_txt, processed_input.data.get('filename'))
         elif processed_input.intent == UserInputIntent.PLAN_THEN_CODE_REQUEST:
@@ -278,8 +288,8 @@ Make the code production-ready and well-structured."""
                 self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                               unknown_intent_msg)
 
-    def _handle_normal_chat(self, user_msg_txt: str, image_data: List[Dict[str, Any]]):
-        """Handle normal chat interaction"""
+    async def _handle_normal_chat_async(self, user_msg_txt: str, image_data: List[Dict[str, Any]]):
+        """Handle normal chat interaction with async RAG support"""
         if not self._is_chat_backend_configured:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,  # type: ignore
                                       parts=["[Error: Chat Backend not ready.]"])
@@ -291,9 +301,22 @@ Make the code production-ready and well-structured."""
 
         history_for_llm = self._current_chat_history[:]
         rag_context_str = ""
-        # MODIFICATION: Pass self._is_rag_ready (which reflects current context readiness)
-        if self._rag_handler.should_perform_rag(user_msg_txt, self._is_rag_ready,
-                                                self._is_rag_ready):  # type: ignore
+
+        # NEW: Wait for embedder to be ready if RAG is needed
+        should_use_rag = self._rag_handler.should_perform_rag(user_msg_txt, self._is_rag_ready,
+                                                              self._is_rag_ready)  # type: ignore
+
+        if should_use_rag and self._upload_service:
+            # Check if embedder is ready, if not wait for it
+            if not self._upload_service._embedder_ready:
+                self._emit_status_update("Waiting for RAG system to initialize...", "#e5c07b", False)
+                embedder_ready = await self._upload_service.wait_for_embedder_ready(timeout_seconds=10.0)
+                if not embedder_ready:
+                    self._emit_status_update("RAG system not ready, continuing without context...", "#e5c07b", True,
+                                             3000)
+                    should_use_rag = False
+
+        if should_use_rag and self._rag_handler:
             logger.info(f"CM: Performing RAG for query: '{user_msg_txt[:50]}'")
             self._emit_status_update("Searching RAG context...", "#61afef", True, 1500)
             query_entities = self._rag_handler.extract_code_entities(user_msg_txt)  # type: ignore
@@ -358,7 +381,7 @@ Make the code production-ready and well-structured."""
             filename = self._detect_file_creation_intent(user_msg_txt)
             if not filename:
                 # Fall back to normal chat if we can't determine a filename
-                self._handle_normal_chat(user_msg_txt, [])
+                asyncio.create_task(self._handle_normal_chat_async(user_msg_txt, []))
                 return
 
         logger.info(f"CM: Handling file creation request for '{filename}'")
@@ -672,7 +695,7 @@ Make the code production-ready and well-structured."""
                                     self._active_chat_personality_prompt)
 
     def _check_rag_readiness_and_emit_status(self):
-        # MODIFICATION: Fixed RAG readiness check to not treat non-existent collections as errors
+        # MODIFICATION: Fixed RAG readiness check with async embedder support
         if not self._upload_service or not hasattr(self._upload_service,
                                                    '_vector_db_service') or not self._upload_service._vector_db_service:  # type: ignore
             self._is_rag_ready = False
@@ -683,7 +706,11 @@ Make the code production-ready and well-structured."""
         rag_status_color = constants.TIMESTAMP_COLOR_HEX  # type: ignore
         current_context_rag_ready = False
 
-        if not self._current_project_id:  # No active project, check GLOBAL RAG
+        # Check if embedder is ready
+        if not self._upload_service._embedder_ready:
+            rag_status_message = "RAG: Initializing embedder..."
+            rag_status_color = "#e5c07b"
+        elif not self._current_project_id:  # No active project, check GLOBAL RAG
             if not self._upload_service._dependencies_ready:  # type: ignore
                 rag_status_message = "Global RAG: Dependencies Missing"
                 rag_status_color = "#e06c75"
@@ -730,6 +757,7 @@ Make the code production-ready and well-structured."""
         logger.info(f"CM: Emitting RAG Status: OverallReady={self._is_rag_ready}, Msg='{rag_status_message}'")
         self._event_bus.ragStatusChanged.emit(self._is_rag_ready, rag_status_message, rag_status_color)
 
+    # Rest of the methods remain the same...
     def set_model_for_backend(self, backend_id: str, model_name: str):
         if backend_id == self._active_chat_backend_id:
             if self._active_chat_model_name != model_name: self._handle_chat_llm_selection_event(backend_id, model_name)

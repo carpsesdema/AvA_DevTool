@@ -1,4 +1,5 @@
 # services/upload_service.py
+import asyncio
 import datetime
 import logging
 import os
@@ -84,6 +85,8 @@ class UploadService:
         self._code_analysis_service: Optional[CodeAnalysisService] = None
         self._index_dim = -1
         self._dependencies_ready = False
+        self._embedder_init_task: Optional[asyncio.Task] = None
+        self._embedder_ready = False
 
         # AVA_ASSISTANT_MODIFIED: Enhanced logging for dependency check
         logger.info(f"  Dependency Status: EMBEDDINGS_AVAILABLE={EMBEDDINGS_AVAILABLE}")
@@ -99,75 +102,91 @@ class UploadService:
             return
 
         try:
-            # AVA_ASSISTANT_MODIFIED: Detailed logging around SentenceTransformer
-            logger.info(f"Attempting to initialize SentenceTransformer with model: {DEFAULT_EMBEDDING_MODEL}")
-            logger.info(f"  ENV_SENTENCE_TRANSFORMERS_HOME: {os.getenv('SENTENCE_TRANSFORMERS_HOME')}")
-            logger.info(f"  ENV_TRANSFORMERS_CACHE: {os.getenv('TRANSFORMERS_CACHE')}")
-            logger.info(f"  ENV_HF_HOME: {os.getenv('HF_HOME')}")
-            logger.info(f"  ENV_HF_ASSETS_CACHE: {os.getenv('HF_ASSETS_CACHE')}")
-            logger.info(f"  Current working directory: {os.getcwd()}")
-            if hasattr(sys, '_MEIPASS'):
-                logger.info(f"  sys._MEIPASS (bundle temp dir): {sys._MEIPASS}")
-
-            self._embedder = SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
-
-            if self._embedder:
-                logger.info("SentenceTransformer initialized successfully.")
-                test_embedding = self._embedder.encode(["test"])
-                if test_embedding is not None and hasattr(test_embedding, 'shape') and len(test_embedding.shape) > 1:
-                    self._index_dim = test_embedding.shape[1]
-                    logger.info(f"Detected embedding dimension: {self._index_dim}")
-                else:
-                    logger.error(
-                        f"Failed to get valid embedding shape after SentenceTransformer init. Test embedding shape: {test_embedding.shape if hasattr(test_embedding, 'shape') else 'N/A'}")
-                    raise ValueError("Failed to get valid embedding shape.")
-            else:
-                logger.error("SentenceTransformer failed to initialize (returned None).")
-                raise ValueError("SentenceTransformer failed to initialize (returned None).")
-
-            if self._index_dim <= 0:
-                logger.error(f"Embedding dimension is invalid ({self._index_dim}). Cannot proceed.")
-                raise ValueError("Failed to determine a valid embedding dimension.")
-
+            # Initialize non-embedding services first
             self._file_handler_service = FileHandlerService()
             logger.info("FileHandlerService initialized.")
+
             self._chunking_service = ChunkingService(
                 chunk_size=getattr(constants, 'RAG_CHUNK_SIZE', 1000),
                 chunk_overlap=getattr(constants, 'RAG_CHUNK_OVERLAP', 150)
             )
             logger.info("ChunkingService initialized.")
-            self._vector_db_service = VectorDBService(index_dimension=self._index_dim)
-            logger.info("VectorDBService initialized attempt.")  # Log before is_ready check
-
-            # VectorDBService.is_ready() without args checks client
-            self._dependencies_ready = self._vector_db_service.is_ready()
-            if self._dependencies_ready:
-                logger.info(
-                    "UploadService core components (Embedder, FileHandler, Chunker, VectorDB client) initialized successfully.")
-            else:
-                logger.error(
-                    "UploadService init: VectorDBService client reported not ready after initialization attempt.")
-                # No return here, let it continue to init CodeAnalysisService if possible
 
             self._code_analysis_service = CodeAnalysisService()
             logger.info("CodeAnalysisService initialized.")
 
-        except Exception as e:
-            logger.exception(
-                f"CRITICAL FAILURE during UploadService component initialization: {e}")  # Use .exception for full traceback
-            self._dependencies_ready = False
-            # Do not return here, allow the method to finish so status can be checked
+            # Initialize VectorDB with a default dimension (will be updated when embedder is ready)
+            self._vector_db_service = VectorDBService(index_dimension=384)  # Default for all-MiniLM-L6-v2
+            logger.info("VectorDBService initialized with default dimension.")
 
-        if not self._dependencies_ready:
-            logger.error(
-                "UploadService: One or more critical dependencies failed to initialize. RAG functionality will be impaired.")
-        else:
-            logger.info("UploadService fully initialized and dependencies appear ready.")
+            # Start embedder initialization in background
+            self._start_embedder_initialization()
+
+        except Exception as e:
+            logger.exception(f"CRITICAL FAILURE during UploadService component initialization: {e}")
+            self._dependencies_ready = False
+
+    def _start_embedder_initialization(self):
+        """Start embedder initialization in background"""
+        if not EMBEDDINGS_AVAILABLE:
+            logger.error("Cannot initialize embedder: SentenceTransformers not available")
+            return
+
+        logger.info("Starting background embedder initialization...")
+        self._embedder_init_task = asyncio.create_task(self._initialize_embedder_async())
+
+    async def _initialize_embedder_async(self):
+        """Initialize embedder asynchronously to avoid blocking the UI"""
+        try:
+            logger.info("Initializing SentenceTransformer in background...")
+
+            # Run the potentially blocking operation in a thread pool
+            loop = asyncio.get_event_loop()
+            self._embedder = await loop.run_in_executor(
+                None,
+                lambda: SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
+            )
+
+            if self._embedder:
+                logger.info("SentenceTransformer initialized successfully.")
+
+                # Test embedding and get dimension
+                test_embedding = await loop.run_in_executor(
+                    None,
+                    lambda: self._embedder.encode(["test"])
+                )
+
+                if test_embedding is not None and hasattr(test_embedding, 'shape') and len(test_embedding.shape) > 1:
+                    self._index_dim = test_embedding.shape[1]
+                    logger.info(f"Detected embedding dimension: {self._index_dim}")
+
+                    # Update VectorDB service with correct dimension
+                    if self._vector_db_service:
+                        self._vector_db_service._index_dim = self._index_dim
+
+                    self._embedder_ready = True
+                    self._dependencies_ready = self._vector_db_service.is_ready() if self._vector_db_service else False
+
+                    if self._dependencies_ready:
+                        logger.info("UploadService fully ready after background initialization.")
+                    else:
+                        logger.error("VectorDBService not ready after embedder initialization.")
+                else:
+                    logger.error("Failed to get valid embedding shape after SentenceTransformer init.")
+                    raise ValueError("Failed to get valid embedding shape.")
+            else:
+                logger.error("SentenceTransformer failed to initialize (returned None).")
+                raise ValueError("SentenceTransformer failed to initialize.")
+
+        except Exception as e:
+            logger.exception(f"Failed to initialize embedder in background: {e}")
+            self._embedder_ready = False
+            self._dependencies_ready = False
 
     def is_vector_db_ready(self, collection_id: Optional[str] = None) -> bool:
-        if not self._dependencies_ready or not self._vector_db_service:
+        if not self._embedder_ready or not self._dependencies_ready or not self._vector_db_service:
             logger.debug(
-                f"is_vector_db_ready check: Main dependencies not ready or _vector_db_service is None. Returning False.")
+                f"is_vector_db_ready check: Embedder ready={self._embedder_ready}, dependencies ready={self._dependencies_ready}")
             return False
 
         if collection_id is None:
@@ -185,6 +204,25 @@ class UploadService:
             return collection_exists_and_accessible
         except Exception as e:
             logger.warning(f"Error checking readiness for collection '{collection_id}': {e}", exc_info=True)
+            return False
+
+    async def wait_for_embedder_ready(self, timeout_seconds: float = 30.0) -> bool:
+        """Wait for embedder to be ready, with timeout"""
+        if self._embedder_ready:
+            return True
+
+        if not self._embedder_init_task:
+            logger.error("No embedder initialization task running")
+            return False
+
+        try:
+            await asyncio.wait_for(self._embedder_init_task, timeout=timeout_seconds)
+            return self._embedder_ready
+        except asyncio.TimeoutError:
+            logger.error(f"Embedder initialization timed out after {timeout_seconds} seconds")
+            return False
+        except Exception as e:
+            logger.error(f"Error waiting for embedder: {e}")
             return False
 
     def _send_batch_to_db(self, collection_id: str,
@@ -216,8 +254,14 @@ class UploadService:
                 f"Exception during batch add to coll '{collection_id}': {e}. Files: {files_in_this_batch_names}")
             return False, set(), num_embeddings_in_batch  # Return 0 for successful embeddings on failure
 
-    def process_files_for_context(self, file_paths: List[str], collection_id: str) -> Optional[
-        ChatMessage]:
+    async def process_files_for_context_async(self, file_paths: List[str], collection_id: str) -> Optional[ChatMessage]:
+        """Async version of process_files_for_context that waits for embedder"""
+        if not await self.wait_for_embedder_ready():
+            return ChatMessage(role=ERROR_ROLE, parts=["[Error: RAG embedder not ready. Please try again.]"])
+
+        return self.process_files_for_context(file_paths, collection_id)
+
+    def process_files_for_context(self, file_paths: List[str], collection_id: str) -> Optional[ChatMessage]:
         if not collection_id:
             logger.error("UploadService: process_files_for_context called without a collection_id.")
             return ChatMessage(role=ERROR_ROLE,
@@ -228,6 +272,12 @@ class UploadService:
 
         num_input_files = len(file_paths)
         logger.info(f"Processing {num_input_files} files for RAG collection '{collection_id}'...")
+
+        # Check if embedder is ready
+        if not self._embedder_ready or not self._embedder:
+            logger.error("UploadService: Embedder not ready for file processing.")
+            return ChatMessage(role=ERROR_ROLE,
+                               parts=["[Error: RAG embedder not ready. Please wait for initialization to complete.]"])
 
         overall_successfully_added_files = set()
         processing_error_files_dict = {}
@@ -240,7 +290,7 @@ class UploadService:
         total_embeddings_in_failed_batches = 0
         any_db_batch_add_failure_occurred = False
 
-        # AVA_ASSISTANT_MODIFIED: Check self._dependencies_ready before proceeding further
+        # Check dependencies readiness
         if not self._dependencies_ready:
             logger.error("UploadService: Core dependencies not ready. Cannot process files for RAG.")
             return ChatMessage(role=ERROR_ROLE,
@@ -467,7 +517,7 @@ class UploadService:
 
     def query_vector_db(self, query_text: str, collection_ids: List[str],
                         n_results: int = constants.RAG_NUM_RESULTS) -> List[Dict[str, Any]]:
-        if not self._dependencies_ready or not self._embedder or not self._vector_db_service:
+        if not self._embedder_ready or not self._embedder or not self._vector_db_service:
             logger.warning("query_vector_db: Core dependencies not ready. Returning empty list.")
             return []
         if not query_text.strip(): return []
@@ -522,11 +572,15 @@ class UploadService:
             for dirpath, dirnames, filenames in os.walk(root_dir, topdown=True, onerror=None):
                 try:
                     rel_dirpath = os.path.relpath(dirpath, root_dir)
-                    depth = rel_dirpath.count(os.sep) if rel_dirpath != '.' else 0
                 except ValueError:
                     logger.warning(f"Cannot get relative path for {dirpath} from {root_dir}. Assuming depth 0.")
                     depth = 0
                     rel_dirpath = dirpath
+
+                if rel_dirpath != '.':
+                    depth = rel_dirpath.count(os.sep)
+                else:
+                    depth = 0
 
                 if depth >= max_depth: skipped_info.append(f"Max Depth ({max_depth}): '{rel_dirpath}'"); dirnames[
                                                                                                          :] = []; continue

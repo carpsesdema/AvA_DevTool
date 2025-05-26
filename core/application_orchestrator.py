@@ -1,4 +1,4 @@
-# core/application_orchestrator.py
+# core/application_orchestrator.py - Fixed code viewer integration
 import logging
 from typing import Dict, Optional, Any, List, TYPE_CHECKING
 
@@ -123,13 +123,8 @@ class ApplicationOrchestrator(QObject):
             self.update_service = None
 
         # --- Code Viewer Dialog ---
+        # IMPORTANT: Don't create the code viewer here, let the dialog service manage it
         self.code_viewer_window = None
-        try:
-            self.code_viewer_window = CodeViewerWindow(parent=None)  # No parent so it can be independent
-            logger.info("CodeViewerWindow initialized successfully")
-        except Exception as e_code_viewer:
-            logger.error(f"Failed to initialize CodeViewerWindow: {e_code_viewer}. Code viewer will be disabled.")
-            self.code_viewer_window = None
 
         # --- LLM Communication Logger ---
         self.llm_communication_logger: Optional[LlmCommunicationLogger] = None
@@ -150,17 +145,10 @@ class ApplicationOrchestrator(QObject):
         self.event_bus.createNewProjectRequested.connect(self._handle_create_new_project_requested)
         self.event_bus.messageFinalizedForSession.connect(self._handle_message_finalized_for_session_persistence)
 
-        # Connect code viewer related signals
+        # Connect code viewer related signals - FIXED: These should auto-create code viewer when needed
         self.event_bus.viewCodeViewerRequested.connect(self._handle_view_code_viewer_requested)
         self.event_bus.modificationFileReadyForDisplay.connect(self._handle_modification_file_ready_for_display)
         self.event_bus.applyFileChangeRequested.connect(self._handle_apply_file_change_requested)
-
-        # Connect code viewer's apply signal to event bus
-        if self.code_viewer_window:
-            self.code_viewer_window.apply_change_requested.connect(
-                lambda project_id, filepath, content, focus_prefix:
-                self.event_bus.applyFileChangeRequested.emit(project_id, filepath, content, focus_prefix)
-            )
 
         # Connect update service if available
         if self.update_service:
@@ -200,20 +188,43 @@ class ApplicationOrchestrator(QObject):
     @Slot()
     def _handle_view_code_viewer_requested(self):
         """Handle request to show the code viewer window"""
-        if self.code_viewer_window:
-            self.code_viewer_window.show()
-            self.code_viewer_window.activateWindow()
-            self.code_viewer_window.raise_()
-            logger.info("Code viewer window shown")
-        else:
-            logger.error("Code viewer window not available")
-            self.event_bus.uiErrorGlobal.emit("Code viewer not available", False)
+        # FIXED: Don't pre-create code viewer, let dialog service handle it
+        logger.info("ApplicationOrchestrator: Code viewer view requested - delegating to dialog service")
+        # The dialog service should handle this request and create/show the code viewer
+
+    def _ensure_code_viewer_created(self):
+        """Ensure code viewer is created and connected properly"""
+        if not self.code_viewer_window:
+            try:
+                self.code_viewer_window = CodeViewerWindow(parent=None)  # No parent so it can be independent
+                logger.info("ApplicationOrchestrator: CodeViewerWindow created successfully")
+
+                # Connect the code viewer's apply signal to event bus
+                if hasattr(self.code_viewer_window, 'apply_change_requested'):
+                    self.code_viewer_window.apply_change_requested.connect(
+                        lambda project_id, filepath, content, focus_prefix:
+                        self.event_bus.applyFileChangeRequested.emit(project_id, filepath, content, focus_prefix)
+                    )
+                    logger.info("ApplicationOrchestrator: Connected CodeViewerWindow apply signal to EventBus")
+                else:
+                    logger.warning("ApplicationOrchestrator: CodeViewerWindow missing apply_change_requested signal")
+
+            except Exception as e_code_viewer:
+                logger.error(f"ApplicationOrchestrator: Failed to create CodeViewerWindow: {e_code_viewer}")
+                self.code_viewer_window = None
+
+        return self.code_viewer_window
 
     @Slot(str, str)
     def _handle_modification_file_ready_for_display(self, filename: str, content: str):
         """Handle when a file is ready to be displayed in the code viewer"""
-        if not self.code_viewer_window:
-            logger.error("Code viewer window not available for displaying file")
+        logger.info(f"ApplicationOrchestrator: File ready for display: {filename} ({len(content)} chars)")
+
+        # Ensure code viewer exists
+        code_viewer = self._ensure_code_viewer_created()
+        if not code_viewer:
+            logger.error("ApplicationOrchestrator: Could not create/access code viewer for file display")
+            self.event_bus.uiErrorGlobal.emit("Code viewer not available", False)
             return
 
         # Get current project context for apply functionality
@@ -221,17 +232,27 @@ class ApplicationOrchestrator(QObject):
         if self.chat_manager:
             current_project_id = self.chat_manager.get_current_project_id()
 
-        # Show the generated file in the code viewer
-        self.code_viewer_window.update_or_add_file(
-            filename=filename,
-            content=content,
-            is_ai_modification=True,
-            original_content=None,  # For new files, no original content
-            project_id_for_apply=current_project_id,
-            focus_prefix_for_apply=self._get_current_project_directory()
-        )
+        # Show and focus the code viewer window
+        try:
+            code_viewer.show()
+            code_viewer.activateWindow()
+            code_viewer.raise_()
 
-        logger.info(f"File '{filename}' displayed in code viewer")
+            # Add/update the file in the code viewer
+            code_viewer.update_or_add_file(
+                filename=filename,
+                content=content,
+                is_ai_modification=True,
+                original_content=None,  # For new files, no original content
+                project_id_for_apply=current_project_id,
+                focus_prefix_for_apply=self._get_current_project_directory()
+            )
+
+            logger.info(f"ApplicationOrchestrator: File '{filename}' displayed in code viewer successfully")
+
+        except Exception as e:
+            logger.error(f"ApplicationOrchestrator: Error displaying file in code viewer: {e}")
+            self.event_bus.uiErrorGlobal.emit(f"Error displaying file in code viewer: {str(e)}", False)
 
     @Slot(str, str, str, str)
     def _handle_apply_file_change_requested(self, project_id: str, relative_filepath: str, new_content: str,
@@ -255,7 +276,7 @@ class ApplicationOrchestrator(QObject):
             with open(full_path, 'w', encoding='utf-8') as f:
                 f.write(new_content)
 
-            logger.info(f"Successfully applied file change: {full_path}")
+            logger.info(f"ApplicationOrchestrator: Successfully applied file change: {full_path}")
             self.event_bus.uiStatusUpdateGlobal.emit(
                 f"File saved: {os.path.basename(relative_filepath)}",
                 "#98c379",
@@ -264,11 +285,11 @@ class ApplicationOrchestrator(QObject):
             )
 
             # Notify code viewer that apply completed
-            if self.code_viewer_window:
+            if self.code_viewer_window and hasattr(self.code_viewer_window, 'handle_apply_completed'):
                 self.code_viewer_window.handle_apply_completed(relative_filepath)
 
         except Exception as e:
-            logger.error(f"Error applying file change for {relative_filepath}: {e}")
+            logger.error(f"ApplicationOrchestrator: Error applying file change for {relative_filepath}: {e}")
             self.event_bus.uiErrorGlobal.emit(f"Failed to save file: {str(e)}", False)
 
     def _get_current_project_directory(self) -> str:
@@ -276,6 +297,20 @@ class ApplicationOrchestrator(QObject):
         # For now, return current working directory
         # This could be enhanced to use project-specific directories
         import os
+
+        # If we have a chat manager with current project, use a project-specific directory
+        if self.chat_manager:
+            current_project_id = self.chat_manager.get_current_project_id()
+            if current_project_id and self.project_manager:
+                project_obj = self.project_manager.get_project_by_id(current_project_id)
+                if project_obj:
+                    # Create a safe directory name from project name
+                    safe_name = "".join(c for c in project_obj.name if c.isalnum() or c in (' ', '-', '_')).strip()
+                    safe_name = safe_name.replace(' ', '_')
+                    project_dir = os.path.join(os.getcwd(), "ava_generated_projects", safe_name)
+                    os.makedirs(project_dir, exist_ok=True)
+                    return project_dir
+
         return os.getcwd()
 
     def initialize_application_state(self):
@@ -454,4 +489,4 @@ class ApplicationOrchestrator(QObject):
 
     def get_code_viewer_window(self) -> Optional[CodeViewerWindow]:
         """Returns the initialized CodeViewerWindow instance."""
-        return self.code_viewer_window
+        return self._ensure_code_viewer_created()

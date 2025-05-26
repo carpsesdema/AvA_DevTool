@@ -1,4 +1,4 @@
-# ui/dialog_service.py
+# ui/dialog_service.py - Fixed version with better code viewer management
 import logging
 from typing import Optional
 
@@ -64,20 +64,31 @@ class DialogService(QObject):
             if self._llm_terminal_window is None and ensure_creation:
                 self._llm_terminal_window = LlmTerminalWindow(parent=None)  # Parent None for top-level
                 logger.info("DialogService: Created new LlmTerminalWindow instance.")
-                if hasattr(self.chat_manager, 'get_llm_communication_logger') and \
-                        (llm_logger := self.chat_manager.get_llm_communication_logger()):
-                    try:
-                        llm_logger.new_terminal_log_entry.disconnect(self._llm_terminal_window.add_log_entry)
-                    except (TypeError, RuntimeError):  # Was not connected or already disconnected
-                        pass
-                    llm_logger.new_terminal_log_entry.connect(self._llm_terminal_window.add_log_entry)
-                    logger.info("DialogService: Connected LLM logger to new LlmTerminalWindow.")
+
+                # Connect the LLM communication logger
+                if hasattr(self.chat_manager, 'get_llm_communication_logger'):
+                    llm_logger = self.chat_manager.get_llm_communication_logger()
+                    if llm_logger and hasattr(llm_logger, 'new_terminal_log_entry'):
+                        try:
+                            # Disconnect any existing connections first
+                            llm_logger.new_terminal_log_entry.disconnect()
+                        except (TypeError, RuntimeError):
+                            pass  # No existing connections
+
+                        # Connect to the new terminal window
+                        llm_logger.new_terminal_log_entry.connect(self._llm_terminal_window.add_log_entry)
+                        logger.info("DialogService: Connected LLM logger to new LlmTerminalWindow.")
+                    else:
+                        logger.warning("DialogService: LLM logger not available or missing signal.")
 
             if self._llm_terminal_window:
                 self._llm_terminal_window.show()
                 self._llm_terminal_window.activateWindow()
                 self._llm_terminal_window.raise_()
+                logger.debug("DialogService: LLM terminal window shown and activated.")
+
             return self._llm_terminal_window
+
         except Exception as e_term:
             logger.error(f"Error showing LlmTerminalWindow: {e_term}", exc_info=True)
             QMessageBox.critical(self.parent_window, "Dialog Error", f"Could not open LLM Terminal:\n{e_term}")
@@ -89,6 +100,8 @@ class DialogService(QObject):
             if self._code_viewer_window is None and ensure_creation:
                 self._code_viewer_window = CodeViewerWindow(parent=self.parent_window)  # Parent is main window
                 logger.info("DialogService: Created new CodeViewerWindow instance.")
+
+                # Connect the apply change signal
                 if hasattr(self._code_viewer_window, 'apply_change_requested'):
                     self._code_viewer_window.apply_change_requested.connect(
                         lambda proj_id, rel_fp, content, focus_p:
@@ -103,11 +116,49 @@ class DialogService(QObject):
                 self._code_viewer_window.show()
                 self._code_viewer_window.activateWindow()
                 self._code_viewer_window.raise_()
+                logger.debug("DialogService: Code viewer window shown and activated.")
+
             return self._code_viewer_window
+
         except Exception as e_cv:
             logger.error(f"Error showing CodeViewerWindow: {e_cv}", exc_info=True)
             QMessageBox.critical(self.parent_window, "Dialog Error", f"Could not open Code Viewer:\n{e_cv}")
             return None
+
+    def get_or_create_code_viewer(self) -> Optional[CodeViewerWindow]:
+        """Get existing code viewer or create new one - used by file display functionality"""
+        return self.show_code_viewer(ensure_creation=True)
+
+    def display_file_in_code_viewer(self, filename: str, content: str, project_id: Optional[str] = None,
+                                    focus_prefix: Optional[str] = None) -> bool:
+        """Display a file in the code viewer - handles creation and display"""
+        try:
+            code_viewer = self.get_or_create_code_viewer()
+            if not code_viewer:
+                logger.error("DialogService: Could not get/create code viewer for file display")
+                return False
+
+            # Update or add the file
+            code_viewer.update_or_add_file(
+                filename=filename,
+                content=content,
+                is_ai_modification=True,
+                original_content=None,
+                project_id_for_apply=project_id,
+                focus_prefix_for_apply=focus_prefix
+            )
+
+            # Ensure the code viewer is visible and focused
+            code_viewer.show()
+            code_viewer.activateWindow()
+            code_viewer.raise_()
+
+            logger.info(f"DialogService: Successfully displayed file '{filename}' in code viewer")
+            return True
+
+        except Exception as e:
+            logger.error(f"DialogService: Error displaying file '{filename}' in code viewer: {e}", exc_info=True)
+            return False
 
     @Slot()
     def trigger_edit_personality_dialog(self) -> None:

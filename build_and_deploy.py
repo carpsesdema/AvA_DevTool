@@ -52,7 +52,7 @@ class AvaBuilder:
 
         # Application details
         self.app_name = "AvA_DevTool"  # Name for the executable
-        self.main_script_path = "main1.py"  # Relative path to your main application script
+        self.main_script_path = "main.py"  # Relative path to your main application script
         self.version_file_path = Path("utils") / "constants.py"  # Relative path to file containing APP_VERSION
 
         print(f"🤖 AvA Desktop App Builder")
