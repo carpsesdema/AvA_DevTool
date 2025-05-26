@@ -10,7 +10,7 @@ This script handles:
 4. Managing version updates
 
 Usage:
-    python build_and_deploy.py --version 1.0.1 --changelog "Bug fixes and improvements"
+    python build_and_deploy.py --version 1.0.1 --changelog "Exe build with proper data handling"
 """
 
 import os
@@ -124,16 +124,17 @@ class AvaBuilder:
             "--workpath", str(self.build_dir),
             "--specpath", str(self.build_dir),
             "--clean",
-            # Add icon if you have one
-            # f"--icon={self.project_root / 'assets' / 'ava_logo.ico'}", # Example
+            # AVA_ASSISTANT_MODIFIED: Add icon
+            f"--icon={self.project_root / 'assets' / 'Synchat.ico'}",
         ]
 
-        # Add data files (assets, UI styles)
+        # Add data files (assets, UI styles, RAG data)
         # Syntax: --add-data "source:destination_in_bundle"
         # Destination is relative to the main script's location in bundle
         data_files_to_add = [
             ("assets", "assets"),  # Bundles the 'assets' folder into an 'assets' folder next to exe
-            ("ui", "ui"),  # Bundles the 'ui' folder (for style.qss, bubble_style.qss)
+            ("ui", "ui"),          # Bundles the 'ui' folder (for style.qss, bubble_style.qss)
+            ("backends", "backends"), # AVA_ASSISTANT_MODIFIED: Bundle the 'backends' folder for RAG
         ]
         for src, dest in data_files_to_add:
             src_path = self.project_root / src
@@ -156,6 +157,7 @@ class AvaBuilder:
             "chromadb", "sqlite3",  # ChromaDB often uses sqlite
             "pypdf",
             "langchain_text_splitters",
+            "langchain", # AVA_ASSISTANT_MODIFIED: Added langchain
             "sentence_transformers", "transformers", "torch",  # Sentence Transformers can be heavy
             "asyncio",
             "importlib_resources",
@@ -170,8 +172,8 @@ class AvaBuilder:
         collect_data_packages = [
             "qtawesome",
             "pygments",
-            # "sentence_transformers", # This can be complex, try if needed
-            # "chromadb", # Might also need this
+            "sentence_transformers", # AVA_ASSISTANT_MODIFIED: Uncommented for RAG models
+            "chromadb", # AVA_ASSISTANT_MODIFIED: Ensured chromadb is collected
         ]
         for pkg_name in collect_data_packages:
             cmd.extend(["--collect-data", pkg_name])
