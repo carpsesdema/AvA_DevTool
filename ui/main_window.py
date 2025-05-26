@@ -213,28 +213,40 @@ class MainWindow(QWidget):
         self._project_manager.sessionSwitched.connect(self._handle_session_switched_ui_update)
         self._project_manager.projectDeleted.connect(self.update_window_title) # Also update title if project is deleted
 
-
     @Slot(str, str)
     def _handle_code_file_update_event(self, filename: str, content: str):
         logger.info(f"MainWindow: Received code update for '{filename}' via EventBus.")
         if self.dialog_service:
+            # FIXED: Use dialog service to show code viewer properly
             code_viewer = self.dialog_service.show_code_viewer(ensure_creation=True)
             if code_viewer:
                 project_id = self.chat_manager.get_current_project_id() if self.chat_manager else "unknown_project"
                 focus_prefix = self._project_manager.get_project_files_dir(
                     project_id) if self._project_manager and project_id != "unknown_project" else self.app_base_path
 
-                code_viewer.update_or_add_file(
-                    filename, content, is_ai_modification=True, original_content=None,
-                    project_id_for_apply=project_id, focus_prefix_for_apply=focus_prefix
-                )
-                logger.info(
-                    f"MainWindow: Successfully added/updated '{filename}' in CodeViewer for project '{project_id}'")
+                # FIXED: Better file handling with proper focus prefix
+                try:
+                    code_viewer.update_or_add_file(
+                        filename, content, is_ai_modification=True, original_content=None,
+                        project_id_for_apply=project_id, focus_prefix_for_apply=focus_prefix
+                    )
+                    logger.info(
+                        f"MainWindow: Successfully added/updated '{filename}' in CodeViewer for project '{project_id}'")
+
+                    # Ensure the code viewer is visible and focused
+                    code_viewer.show()
+                    code_viewer.activateWindow()
+                    code_viewer.raise_()
+
+                except Exception as e_update:
+                    logger.error(f"MainWindow: Error updating code viewer with file '{filename}': {e_update}")
+                    self.update_status(f"Error displaying {filename} in code viewer", "#e06c75", True, 5000)
             else:
                 logger.error("MainWindow: CodeViewerDialog instance could not be obtained/created.")
+                self.update_status("Could not open code viewer", "#e06c75", True, 3000)
         else:
             logger.error("MainWindow: DialogService not available to show CodeViewer.")
-
+            self.update_status("Dialog service not available", "#e06c75", True, 3000)
     @Slot(str)
     def _handle_project_switched_ui_update(self, project_id: str):
         logger.info(f"MW: UI Update for project switched (from PM signal): {project_id}")
