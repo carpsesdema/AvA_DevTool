@@ -14,17 +14,19 @@ try:
     from services.llm_communication_logger import LlmCommunicationLogger
     from services.upload_service import UploadService
     from services.terminal_service import TerminalService
+    from services.update_service import UpdateService  # NEW: Add UpdateService import
     from core.rag_handler import RagHandler
     from utils import constants
     from services.project_service import ProjectManager, Project, ChatSession
     from core.models import ChatMessage
-    from ui.dialogs.code_viewer_dialog import CodeViewerWindow  # NEW
+    from ui.dialogs.code_viewer_dialog import CodeViewerWindow
 except ImportError as e:
     ProjectManager = type("ProjectManager", (object,), {})  # type: ignore
     ChatMessage = type("ChatMessage", (object,), {})  # type: ignore
     UploadService = type("UploadService", (object,), {})  # type: ignore
     RagHandler = type("RagHandler", (object,), {})  # type: ignore
     TerminalService = type("TerminalService", (object,), {})  # type: ignore
+    UpdateService = type("UpdateService", (object,), {})  # type: ignore
     CodeViewerWindow = type("CodeViewerWindow", (object,), {})  # type: ignore
     logging.getLogger(__name__).critical(f"Critical import error in ApplicationOrchestrator: {e}", exc_info=True)
     raise
@@ -111,6 +113,15 @@ class ApplicationOrchestrator(QObject):
                 f"Failed to initialize TerminalService: {e_terminal}. Terminal functionality will be disabled.")
             self.terminal_service = None
 
+        # --- Update Service ---
+        self.update_service = None
+        try:
+            self.update_service = UpdateService(parent=self)
+            logger.info("UpdateService initialized successfully")
+        except Exception as e_update:
+            logger.error(f"Failed to initialize UpdateService: {e_update}. Update functionality will be disabled.")
+            self.update_service = None
+
         # --- Code Viewer Dialog ---
         self.code_viewer_window = None
         try:
@@ -151,10 +162,40 @@ class ApplicationOrchestrator(QObject):
                 self.event_bus.applyFileChangeRequested.emit(project_id, filepath, content, focus_prefix)
             )
 
+        # Connect update service if available
+        if self.update_service:
+            self.event_bus.checkForUpdatesRequested.connect(self.update_service.check_for_updates)
+
+            # Connect update service signals to event bus
+            self.update_service.update_available.connect(self.event_bus.updateAvailable.emit)
+            self.update_service.no_update_available.connect(self.event_bus.noUpdateAvailable.emit)
+            self.update_service.update_check_failed.connect(self.event_bus.updateCheckFailed.emit)
+            self.update_service.update_downloaded.connect(self.event_bus.updateDownloaded.emit)
+            self.update_service.update_download_failed.connect(self.event_bus.updateDownloadFailed.emit)
+            self.update_service.update_progress.connect(self.event_bus.updateProgress.emit)
+            self.update_service.update_status.connect(self.event_bus.updateStatusChanged.emit)
+
+            # Connect download and install requests
+            self.event_bus.updateDownloadRequested.connect(self.update_service.download_update)
+            self.event_bus.updateInstallRequested.connect(self._handle_update_install)
+            self.event_bus.applicationRestartRequested.connect(self.update_service.restart_application)
+
         if hasattr(self.project_manager, 'projectDeleted'):
             self.project_manager.projectDeleted.connect(self._handle_project_deleted)  # type: ignore
         else:
             logger.warning("ProjectManager does not have projectDeleted signal. Cannot connect in Orchestrator.")
+
+    @Slot(str)
+    def _handle_update_install(self, file_path: str):
+        """Handle update installation request"""
+        if self.update_service:
+            success = self.update_service.apply_update(file_path)
+            if success:
+                logger.info("Update applied successfully, requesting restart")
+                self.event_bus.applicationRestartRequested.emit()
+            else:
+                logger.error("Failed to apply update")
+                self.event_bus.uiErrorGlobal.emit("Failed to install update", False)
 
     @Slot()
     def _handle_view_code_viewer_requested(self):
@@ -403,10 +444,14 @@ class ApplicationOrchestrator(QObject):
         """Returns the initialized RagHandler instance."""
         return self.rag_handler
 
-    def get_terminal_service(self) -> TerminalService:  # NEW GETTER
+    def get_terminal_service(self) -> TerminalService:
         """Returns the initialized TerminalService instance."""
         return self.terminal_service
 
-    def get_code_viewer_window(self) -> Optional[CodeViewerWindow]:  # NEW GETTER
+    def get_update_service(self) -> Optional[UpdateService]:  # NEW GETTER
+        """Returns the initialized UpdateService instance."""
+        return self.update_service
+
+    def get_code_viewer_window(self) -> Optional[CodeViewerWindow]:
         """Returns the initialized CodeViewerWindow instance."""
         return self.code_viewer_window
