@@ -119,10 +119,21 @@ class UploadService:
             self._dependencies_ready = False
 
     def is_vector_db_ready(self, collection_id: Optional[str] = None) -> bool:
-        if not self._dependencies_ready or not self._vector_db_service: return False
-        # If no collection_id, check general client readiness.
-        # If collection_id is provided, VectorDBService.is_ready(collection_id) checks for that specific collection.
-        return self._vector_db_service.is_ready(collection_id)
+        """Check if vector DB is ready. For collection_id, check if it can be accessed/created."""
+        if not self._dependencies_ready or not self._vector_db_service:
+            return False
+
+        # If no collection_id, check general client readiness
+        if collection_id is None:
+            return self._vector_db_service.is_ready()
+
+        # For specific collection, try to get/create it to see if it works
+        try:
+            collection = self._vector_db_service.get_or_create_collection(collection_id)
+            return collection is not None
+        except Exception as e:
+            logger.warning(f"Error checking readiness for collection '{collection_id}': {e}")
+            return False
 
     def _send_batch_to_db(self, collection_id: str,
                           batch_contents: List[str],
@@ -412,7 +423,7 @@ class UploadService:
                 if not coll_id or not isinstance(coll_id, str):
                     logger.warning(f"Skipping invalid collection_id in query: {coll_id}")
                     continue
-                if self._vector_db_service.is_ready(coll_id):
+                if self.is_vector_db_ready(coll_id):
                     logger.debug(f"Querying collection: {coll_id} for '{query_text[:30]}...'")
                     coll_results = self._vector_db_service.search(coll_id, query_embedding, k=n_results)  # type: ignore
                     if coll_results:
@@ -487,4 +498,3 @@ class UploadService:
         logger.info(
             f"Scan of '{os.path.basename(root_dir)}' found {len(valid_files)} files. Skipped/Errors: {len(skipped_info)}")
         return valid_files, skipped_info
-

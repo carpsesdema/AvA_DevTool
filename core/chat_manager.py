@@ -457,7 +457,7 @@ class ChatManager(QObject):
                                     self._active_chat_personality_prompt)
 
     def _check_rag_readiness_and_emit_status(self):
-        # MODIFICATION: Dynamic RAG readiness check
+        # MODIFICATION: Fixed RAG readiness check to not treat non-existent collections as errors
         if not self._upload_service or not hasattr(self._upload_service,
                                                    '_vector_db_service') or not self._upload_service._vector_db_service:  # type: ignore
             self._is_rag_ready = False
@@ -469,13 +469,11 @@ class ChatManager(QObject):
         current_context_rag_ready = False
 
         if not self._current_project_id:  # No active project, check GLOBAL RAG
-            if not self._upload_service.is_vector_db_ready(constants.GLOBAL_COLLECTION_ID):  # type: ignore
-                rag_status_message = "Global RAG: DB Error"
-                rag_status_color = "#e06c75"
-            elif not self._upload_service._dependencies_ready:  # type: ignore
+            if not self._upload_service._dependencies_ready:  # type: ignore
                 rag_status_message = "Global RAG: Dependencies Missing"
                 rag_status_color = "#e06c75"
             else:
+                # Try to get collection size, which will create the collection if it doesn't exist
                 global_size = self._upload_service._vector_db_service.get_collection_size(
                     constants.GLOBAL_COLLECTION_ID)  # type: ignore
                 if global_size == -1:
@@ -494,13 +492,11 @@ class ChatManager(QObject):
             project_display_name = project_name_display.name[:15] if project_name_display else self._current_project_id[
                                                                                                :8]
 
-            if not self._upload_service.is_vector_db_ready(self._current_project_id):  # type: ignore
-                rag_status_message = f"RAG for '{project_display_name}...': DB Error"
-                rag_status_color = "#e06c75"
-            elif not self._upload_service._dependencies_ready:  # type: ignore
+            if not self._upload_service._dependencies_ready:  # type: ignore
                 rag_status_message = f"RAG for '{project_display_name}...': Dependencies Missing"
                 rag_status_color = "#e06c75"
             else:
+                # Try to get collection size, which will create the collection if it doesn't exist
                 project_size = self._upload_service._vector_db_service.get_collection_size(
                     self._current_project_id)  # type: ignore
                 if project_size == -1:
@@ -602,4 +598,3 @@ class ChatManager(QObject):
         logger.info("ChatManager cleanup...")
         if self._current_llm_request_id: self._backend_coordinator.cancel_current_task(
             self._current_llm_request_id); self._current_llm_request_id = None
-
