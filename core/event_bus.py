@@ -36,6 +36,11 @@ class EventBus(QObject):
     openProjectSelectorRequested = Signal()
     renameCurrentSessionRequested = Signal(str)  # new_session_name
 
+    # NEW: Loading Overlay Controls
+    showLoader = Signal(str)  # message: str
+    hideLoader = Signal()
+    updateLoaderMessage = Signal(str)  # message: str - update message without hide/show
+
     # Backend & LLM Communication
     backendConfigurationChanged = Signal(str, str, bool, list) # backend_id, model_name, is_configured, available_models
     llmRequestSent = Signal(str, str) # backend_id, request_id

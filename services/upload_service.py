@@ -1,4 +1,3 @@
-# services/upload_service.py
 import asyncio
 import datetime
 import logging
@@ -6,7 +5,7 @@ import os
 import sys
 from html import escape
 from typing import List, Tuple, Optional, Set, Dict, Any
-
+from core.event_bus import EventBus
 import numpy as np  # Keep this import, it's used
 
 try:
@@ -169,8 +168,22 @@ class UploadService:
 
                     if self._dependencies_ready:
                         logger.info("UploadService fully ready after background initialization.")
+
+                        # FIX: Emit the status change event to update the UI
+                        try:
+                            event_bus = EventBus.get_instance()
+                            event_bus.ragStatusChanged.emit(True, "RAG: Ready ✓", "#4ade80")
+                            logger.info("Emitted RAG ready status to EventBus")
+                        except Exception as e:
+                            logger.error(f"Failed to emit RAG status change: {e}")
+
                     else:
                         logger.error("VectorDBService not ready after embedder initialization.")
+                        try:
+                            event_bus = EventBus.get_instance()
+                            event_bus.ragStatusChanged.emit(False, "RAG: VectorDB Error", "#ef4444")
+                        except Exception as e:
+                            logger.error(f"Failed to emit RAG error status: {e}")
                 else:
                     logger.error("Failed to get valid embedding shape after SentenceTransformer init.")
                     raise ValueError("Failed to get valid embedding shape.")
@@ -182,6 +195,13 @@ class UploadService:
             logger.exception(f"Failed to initialize embedder in background: {e}")
             self._embedder_ready = False
             self._dependencies_ready = False
+
+            # FIX: Emit error status to UI
+            try:
+                event_bus = EventBus.get_instance()
+                event_bus.ragStatusChanged.emit(False, "RAG: Initialization Failed", "#ef4444")
+            except Exception as emit_error:
+                logger.error(f"Failed to emit RAG error status: {emit_error}")
 
     def is_vector_db_ready(self, collection_id: Optional[str] = None) -> bool:
         if not self._embedder_ready or not self._dependencies_ready or not self._vector_db_service:

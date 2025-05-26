@@ -238,12 +238,7 @@ class OllamaAdapter(BackendInterface):
                 items_to_parse = models_response_data['models']
             elif isinstance(models_response_data, list):
                 items_to_parse = models_response_data  # Older versions might return a list of model objects/dicts
-            # Add more specific checks if ollama library types are reliably importable
-            elif _ollama_types_imported_successfully and isinstance(models_response_data,
-                                                                    _OllamaListResponseType):  # type: ignore
-                if hasattr(models_response_data, 'models') and isinstance(models_response_data.models,
-                                                                          list):  # type: ignore
-                    items_to_parse = models_response_data.models  # type: ignore
+            # REMOVED THE PROBLEMATIC _OllamaListResponseType CHECK THAT WAS CAUSING THE BUG
 
             for item in items_to_parse:
                 model_id_to_add = None

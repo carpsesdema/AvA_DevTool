@@ -20,6 +20,7 @@ try:
     from ui.dialog_service import DialogService
     from ui.chat_display_area import ChatDisplayArea
     from ui.chat_input_bar import ChatInputBar
+    from ui.loading_overlay import LoadingOverlay  # NEW: Loading overlay import
     from utils import constants
     from core.chat_message_state_handler import ChatMessageStateHandler
     from services.project_service import Project, ChatSession
@@ -58,6 +59,7 @@ class MainWindow(QWidget):
         self.active_chat_display_area: Optional[ChatDisplayArea] = None
         self.active_chat_input_bar: Optional[ChatInputBar] = None
         self._chat_message_state_handler: Optional[ChatMessageStateHandler] = None
+        self._loading_overlay: Optional[LoadingOverlay] = None  # NEW: Loading overlay
 
         self._current_base_status_text: str = "Status: Initializing..."
         self._current_base_status_color: str = "#abb2bf"  # Default color
@@ -76,6 +78,7 @@ class MainWindow(QWidget):
         self._connect_signals_and_event_bus()
         self._connect_project_manager_signals_to_ui()
         self._setup_window_properties()
+        self._init_loading_overlay()  # NEW: Initialize loading overlay
         logger.info("MainWindow initialized successfully.")
 
     def _setup_window_properties(self):
@@ -105,6 +108,15 @@ class MainWindow(QWidget):
         except Exception as e_icon:
             logger.error(f"Error setting window icon: {e_icon}", exc_info=True)
         self.update_window_title()
+
+    def _init_loading_overlay(self):
+        """Initialize the loading overlay"""
+        try:
+            self._loading_overlay = LoadingOverlay(parent=self)
+            logger.info("Loading overlay initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize loading overlay: {e}")
+            self._loading_overlay = None
 
     def _init_ui(self):
         # ... (UI initialization remains largely the same) ...
@@ -213,6 +225,11 @@ class MainWindow(QWidget):
         bus.uiInputBarBusyStateChanged.connect(self._handle_input_bar_busy_state_change)
         bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event)
 
+        # NEW: Loading overlay signals
+        bus.showLoader.connect(self._show_loading_overlay)
+        bus.hideLoader.connect(self._hide_loading_overlay)
+        bus.updateLoaderMessage.connect(self._update_loading_message)
+
         # MainWindow handles showing the code viewer when this signal is emitted
         bus.modificationFileReadyForDisplay.connect(self._handle_code_file_update_event)
 
@@ -235,6 +252,30 @@ class MainWindow(QWidget):
         self._project_manager.projectSwitched.connect(self._handle_project_switched_ui_update)
         self._project_manager.sessionSwitched.connect(self._handle_session_switched_ui_update)
         self._project_manager.projectDeleted.connect(self.update_window_title)
+
+    # NEW: Loading overlay slot methods
+    @Slot(str)
+    def _show_loading_overlay(self, message: str):
+        """Show the loading overlay with a message"""
+        if self._loading_overlay:
+            self._loading_overlay.show_loading(message)
+            logger.debug(f"Showing loading overlay: {message}")
+        else:
+            logger.warning("Loading overlay not available")
+
+    @Slot()
+    def _hide_loading_overlay(self):
+        """Hide the loading overlay"""
+        if self._loading_overlay:
+            self._loading_overlay.hide_loading()
+            logger.debug("Hiding loading overlay")
+
+    @Slot(str)
+    def _update_loading_message(self, message: str):
+        """Update the loading overlay message"""
+        if self._loading_overlay and self._loading_overlay.isVisible():
+            self._loading_overlay.update_message(message)
+            logger.debug(f"Updated loading message: {message}")
 
     @Slot(str, str)
     def _handle_code_file_update_event(self, filename: str, content: str):
@@ -266,15 +307,6 @@ class MainWindow(QWidget):
         else:
             logger.error("MainWindow: DialogService not available to handle code file update.")
             self.update_status("Dialog service for code viewer not available", "#e06c75", True, 3000)
-
-    # ... (rest of the methods: _handle_project_switched_ui_update, _handle_session_switched_ui_update,
-    #      _handle_new_message_added_to_history, _handle_active_session_cleared,
-    #      _handle_active_session_history_loaded, _handle_message_chunk_for_session,
-    #      _handle_message_finalized_for_session, update_status, _refresh_full_status_display,
-    #      _clear_temporary_status, _handle_error_event, _handle_input_bar_busy_state_change,
-    #      _handle_backend_configuration_changed_event, _handle_escape_key_pressed,
-    #      update_window_title, closeEvent, showEvent)
-    # ... should remain largely the same as the last correct version you have for those ...
 
     @Slot(str)
     def _handle_project_switched_ui_update(self, project_id: str):
@@ -477,8 +509,21 @@ class MainWindow(QWidget):
 
         self.setWindowTitle(f"{base_title} - [{', '.join(details)}]" if details else base_title)
 
+    def resizeEvent(self, event):
+        """Handle window resize events"""
+        super().resizeEvent(event)
+
+        # NEW: Ensure loading overlay covers the entire window
+        if self._loading_overlay and self._loading_overlay.isVisible():
+            self._loading_overlay.resize(self.size())
+
     def closeEvent(self, event: QCloseEvent):
         logger.info("MainWindow closeEvent triggered. Performing cleanup...")
+
+        # NEW: Hide loading overlay
+        if self._loading_overlay:
+            self._loading_overlay.hide_loading()
+
         if self.dialog_service and hasattr(self.dialog_service, 'close_non_modal_dialogs'):
             self.dialog_service.close_non_modal_dialogs()
         if self.chat_manager and hasattr(self.chat_manager, 'cleanup_phase1'):
