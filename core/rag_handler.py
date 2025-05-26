@@ -6,14 +6,14 @@ from typing import List, Optional, Set, Tuple, Dict, Any
 
 try:
     from services.upload_service import UploadService
-    from services.vector_db_service import VectorDBService, GLOBAL_COLLECTION_ID
+    from services.vector_db_service import VectorDBService, GLOBAL_COLLECTION_ID  # type: ignore
     from utils import constants
 except ImportError as e:
     logging.critical(f"RagHandler: Failed to import services/utils: {e}")
-    UploadService = type("UploadService", (object,), {})
-    VectorDBService = type("VectorDBService", (object,), {})
+    UploadService = type("UploadService", (object,), {})  # type: ignore
+    VectorDBService = type("VectorDBService", (object,), {})  # type: ignore
     GLOBAL_COLLECTION_ID = "global_knowledge_fallback"  # Fallback
-    constants = type("constants", (object,),
+    constants = type("constants", (object,),  # type: ignore
                      {"RAG_NUM_RESULTS": 5, "RAG_CHUNK_SIZE": 1000, "RAG_CHUNK_OVERLAP": 150})
 
 logger = logging.getLogger(__name__)
@@ -48,12 +48,12 @@ class RagHandler:
         self._upload_service = None
         self._vector_db_service = None
 
-        if not upload_service or not isinstance(upload_service, UploadService):
+        if not upload_service or not isinstance(upload_service, UploadService):  # type: ignore
             logger.warning("RagHandler initialized with invalid or missing UploadService")
         else:
             self._upload_service = upload_service
 
-        if not vector_db_service or not isinstance(vector_db_service, VectorDBService):
+        if not vector_db_service or not isinstance(vector_db_service, VectorDBService):  # type: ignore
             logger.warning("RagHandler initialized with invalid or missing VectorDBService")
         else:
             self._vector_db_service = vector_db_service
@@ -70,12 +70,13 @@ class RagHandler:
         query_lower = query.lower().strip()
         if len(query) < 15 and self._GREETING_PATTERNS.match(query_lower):
             return False
-        if len(query) < 10:
+        if len(query) < 10:  # Too short to likely benefit from RAG
             return False
-        if self._CODE_FENCE_PATTERN.search(query):
+        if self._CODE_FENCE_PATTERN.search(query):  # Code often needs context
             return True
         if any(keyword in query_lower for keyword in self._TECHNICAL_KEYWORDS):
             return True
+        # Heuristic: if query contains characters common in code or technical discussion and is of reasonable length
         if re.search(r"[_.(){}\[\]=:]", query) and len(query) > 15:
             return True
         return False
@@ -84,13 +85,17 @@ class RagHandler:
         entities = set()
         if not query:
             return entities
+        # Regex to find potential variable/function/class names
+        # Looks for words followed by (, =, or . which often indicate usage
         code_entity_pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*\(\s*|\s*=\s*|\s*\.)'
         try:
             for match in re.finditer(code_entity_pattern, query):
                 entity = match.group(1)
+                # Filter out common keywords and very short words
                 if len(entity) > 2 and entity.lower() not in ['def', 'class', 'self', 'init', 'str', 'repr', 'args',
                                                               'kwargs', 'return', 'true', 'false', 'none']:
                     entities.add(entity)
+            # Regex for filenames (e.g., main.py, utils.js)
             filename_pattern = r'\b(\w+\.\w+)\b'
             for match in re.finditer(filename_pattern, query):
                 entities.add(match.group(1))
@@ -104,7 +109,7 @@ class RagHandler:
             self,
             query: str,
             query_entities: Set[str],
-            project_id: Optional[str],
+            project_id: Optional[str],  # MODIFICATION: project_id is key for project-specific RAG
             explicit_focus_paths: Optional[List[str]] = None,
             implicit_focus_paths: Optional[List[str]] = None,
             is_modification_request: bool = False
@@ -114,7 +119,7 @@ class RagHandler:
             return "", []
 
         context_str = ""
-        queried_collections_actual = []
+        queried_collections_actual: List[str] = []  # To store names of collections that actually yielded results
 
         normalized_explicit_focus = {os.path.normcase(os.path.abspath(p)) for p in
                                      explicit_focus_paths} if explicit_focus_paths else set()
@@ -126,17 +131,19 @@ class RagHandler:
         if normalized_implicit_focus: logger.info(
             f"RAG Handler: Using implicit focus paths: {normalized_implicit_focus}")
 
+        # MODIFICATION: Determine which collections to query
         collections_to_query_candidates: List[str] = []
 
         # 1. Add project-specific collection if project_id is provided and it's ready
-        if project_id and project_id != GLOBAL_COLLECTION_ID:  # Ensure project_id is not the global one
+        #    Ensure project_id is not the same as GLOBAL_COLLECTION_ID to avoid duplication if global is the "project"
+        if project_id and project_id != GLOBAL_COLLECTION_ID:
             if self._vector_db_service.is_ready(project_id):
                 collections_to_query_candidates.append(project_id)
                 logger.info(f"RAG: Added project collection '{project_id}' to query candidates.")
             else:
                 logger.warning(f"RAG: Project collection '{project_id}' is not ready, skipping.")
 
-        # 2. Always add GLOBAL_COLLECTION_ID if it's ready (and not already added if project_id was global)
+        # 2. Always add GLOBAL_COLLECTION_ID if it's ready and not already added
         if GLOBAL_COLLECTION_ID not in collections_to_query_candidates:
             if self._vector_db_service.is_ready(GLOBAL_COLLECTION_ID):
                 collections_to_query_candidates.append(GLOBAL_COLLECTION_ID)
@@ -144,7 +151,7 @@ class RagHandler:
             else:
                 logger.warning(f"RAG: Global collection '{GLOBAL_COLLECTION_ID}' not ready, skipping.")
 
-        # Ensure uniqueness if somehow GLOBAL_COLLECTION_ID was also the project_id
+        # Ensure uniqueness (though the above logic should prevent duplicates)
         collections_to_query_candidates = list(dict.fromkeys(collections_to_query_candidates))
 
         if not collections_to_query_candidates:
@@ -160,11 +167,12 @@ class RagHandler:
             num_initial_results = getattr(constants, 'RAG_NUM_RESULTS', 5) * (3 if is_modification_request else 2)
             num_final_results = getattr(constants, 'RAG_NUM_RESULTS', 5)
 
-            # UploadService.query_vector_db now queries all listed collections and returns combined results
+            # MODIFICATION: UploadService.query_vector_db now queries all listed collections
+            # and returns combined results. Each result should have metadata indicating its source collection.
             relevant_chunks = self._upload_service.query_vector_db(
                 query,
                 collection_ids=collections_to_query_candidates,  # Pass all candidates
-                n_results=num_initial_results
+                n_results=num_initial_results  # Fetch more initially for re-ranking
             )
 
             # Track which collections actually returned results based on metadata from UploadService
@@ -196,16 +204,17 @@ class RagHandler:
                         except Exception as e_norm_chunk:
                             logger.warning(
                                 f"Could not normalize chunk source path '{chunk_source_path}': {e_norm_chunk}")
-                            pass
+                            pass  # norm_chunk_path will remain None
 
+                    # Explicit focus boost
                     if norm_chunk_path and normalized_explicit_focus:
                         is_explicitly_focused = False
                         for focus_path in normalized_explicit_focus:
-                            if os.path.isdir(focus_path):
-                                if norm_chunk_path.startswith(focus_path + os.sep):
+                            if os.path.isdir(focus_path):  # If focus_path is a directory
+                                if norm_chunk_path.startswith(focus_path + os.sep):  # Check if chunk is within dir
                                     is_explicitly_focused = True;
                                     break
-                            elif norm_chunk_path == focus_path:
+                            elif norm_chunk_path == focus_path:  # If focus_path is a file
                                 is_explicitly_focused = True;
                                 break
                         if is_explicitly_focused:
@@ -216,6 +225,7 @@ class RagHandler:
                             logger.debug(
                                 f"  Applied EXPLICIT boost to chunk from '{chunk_source_path}'. New dist: {chunk['distance']:.4f}")
 
+                    # Implicit focus boost (only if not already boosted by explicit)
                     if not boost_applied_this_chunk and norm_chunk_path and normalized_implicit_focus:
                         is_implicitly_focused = False
                         for focus_path in normalized_implicit_focus:
@@ -234,9 +244,10 @@ class RagHandler:
                             logger.debug(
                                 f"  Applied IMPLICIT boost to chunk from '{chunk_source_path}'. New dist: {chunk['distance']:.4f}")
 
+                    # Entity boost (only if not already boosted by focus)
                     if not boost_applied_this_chunk and query_entities and 'code_entities' in metadata:
-                        chunk_entities_set = set(
-                            str(metadata.get('code_entities', "")).split(", "))  # Handle string format from DB
+                        # Assuming 'code_entities' is a comma-separated string from DB
+                        chunk_entities_set = set(str(metadata.get('code_entities', "")).split(", "))
                         if "" in chunk_entities_set: chunk_entities_set.remove("")  # Remove empty strings if any
                         if not query_entities.isdisjoint(chunk_entities_set):
                             chunk['distance'] *= self.ENTITY_BOOST_FACTOR
@@ -251,12 +262,13 @@ class RagHandler:
                         f"ImplicitFocus={boosted_by_implicit_focus_count}, Entity={boosted_by_entity_count} chunks."
                     )
 
+                # Ensure all distances are numeric before sorting
                 valid_chunks = [res for res in relevant_chunks if isinstance(res.get('distance'), (int, float))]
                 sorted_results = sorted(valid_chunks, key=lambda x: x.get('distance', float('inf')))
                 final_results = sorted_results[:num_final_results]
 
                 context_parts = []
-                retrieved_chunks_details = []
+                retrieved_chunks_details = []  # For logging
                 for i, chunk in enumerate(final_results):
                     metadata = chunk.get("metadata", {})
                     filename = metadata.get("filename", "unknown_source")
@@ -265,7 +277,7 @@ class RagHandler:
                                                          metadata.get("collection_id", "N/A"))
                     code_content = chunk.get("content", "[Content Missing]")
                     distance = chunk.get('distance', -1.0)
-                    boost_reason = chunk.get('boost_reason')
+                    boost_reason = chunk.get('boost_reason')  # Get boost reason if any
                     start_line = metadata.get('start_line', 'N/A')
                     end_line = metadata.get('end_line', 'N/A')
 
@@ -305,3 +317,4 @@ class RagHandler:
             context_str = "[Error retrieving RAG context]"
 
         return context_str, queried_collections_actual
+

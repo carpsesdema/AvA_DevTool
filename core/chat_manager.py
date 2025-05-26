@@ -23,9 +23,9 @@ try:
     from core.user_input_handler import UserInputHandler, UserInputIntent
     from core.plan_and_code_coordinator import PlanAndCodeCoordinator
 except ImportError as e:
-    ProjectManager = type("ProjectManager", (object,), {})
-    UploadService = type("UploadService", (object,), {})
-    RagHandler = type("RagHandler", (object,), {})
+    ProjectManager = type("ProjectManager", (object,), {})  # type: ignore
+    UploadService = type("UploadService", (object,), {})  # type: ignore
+    RagHandler = type("RagHandler", (object,), {})  # type: ignore
     logging.getLogger(__name__).critical(f"Critical import error in ChatManager: {e}", exc_info=True)
     raise
 
@@ -47,7 +47,7 @@ class ChatManager(QObject):
         self._upload_service = self._orchestrator.get_upload_service()
         self._rag_handler = self._orchestrator.get_rag_handler()
 
-        if not isinstance(self._project_manager, ProjectManager):
+        if not isinstance(self._project_manager, ProjectManager):  # type: ignore
             logger.critical("ChatManager received an invalid ProjectManager instance.")
             raise TypeError("ChatManager requires a valid ProjectManager instance from Orchestrator.")
 
@@ -59,7 +59,7 @@ class ChatManager(QObject):
             parent=self
         )
 
-        self._current_chat_history: List[ChatMessage] = []
+        self._current_chat_history: List[ChatMessage] = []  # type: ignore
         self._current_project_id: Optional[str] = None
         self._current_session_id: Optional[str] = None
         self._active_chat_backend_id: str = constants.DEFAULT_CHAT_BACKEND_ID
@@ -75,7 +75,7 @@ class ChatManager(QObject):
         self._active_temperature: float = 0.7
         self._is_chat_backend_configured: bool = False
         self._is_specialized_backend_configured: bool = False
-        self._is_rag_ready: bool = False
+        self._is_rag_ready: bool = False  # Represents if RAG for *current context* is generally usable
         self._current_llm_request_id: Optional[str] = None
 
         self._connect_event_bus_subscriptions()
@@ -89,7 +89,7 @@ class ChatManager(QObject):
                                 constants.CODER_AI_SYSTEM_PROMPT)
         self._check_rag_readiness_and_emit_status()
 
-    def set_active_session(self, project_id: str, session_id: str, history: List[ChatMessage]):
+    def set_active_session(self, project_id: str, session_id: str, history: List[ChatMessage]):  # type: ignore
         logger.info(f"CM: Setting active session to P:{project_id}/S:{session_id}. History items: {len(history)}")
         old_project_id = self._current_project_id
         self._current_project_id = project_id
@@ -105,10 +105,8 @@ class ChatManager(QObject):
         self._event_bus.activeSessionHistoryLoaded.emit(project_id, session_id, self._current_chat_history)
         self._emit_status_update(f"Switched to session.", "#98c379", True, 2000)
 
-        if old_project_id != project_id:  # Re-check RAG status if project changed
-            self._check_rag_readiness_and_emit_status()
-        elif not self._is_rag_ready:  # Or if RAG wasn't ready before
-            self._check_rag_readiness_and_emit_status()
+        # Always re-check RAG status on session switch, as project might have changed or RAG state updated
+        self._check_rag_readiness_and_emit_status()
 
     def _connect_event_bus_subscriptions(self):
         logger.debug("ChatManager connecting EventBus subscriptions...")
@@ -121,7 +119,12 @@ class ChatManager(QObject):
         self._event_bus.llmResponseCompleted.connect(self._handle_llm_response_completed)
         self._event_bus.llmResponseError.connect(self._handle_llm_response_error)
         self._event_bus.backendConfigurationChanged.connect(self._handle_backend_reconfigured_event)
-        self._event_bus.requestRagScanDirectory.connect(self.request_rag_scan_directory)
+
+        # MODIFICATION: Connect to the correct RAG signals
+        self._event_bus.requestRagScanDirectory.connect(self.request_global_rag_scan_directory)  # For global
+        self._event_bus.requestProjectFilesUpload.connect(
+            self.handle_project_files_upload_request)  # For project-specific
+
         logger.debug("ChatManager EventBus subscriptions connected.")
 
     def _emit_status_update(self, message: str, color: str, is_temporary: bool = False, duration_ms: int = 0):
@@ -138,15 +141,15 @@ class ChatManager(QObject):
         logger.info(f"CM: Configuring backend '{backend_id}' with model '{model_name}'")
         api_key_to_use: Optional[str] = None
         actual_system_prompt = system_prompt
-        if backend_id == constants.GENERATOR_BACKEND_ID:
-            actual_system_prompt = constants.CODER_AI_SYSTEM_PROMPT
+        if backend_id == constants.GENERATOR_BACKEND_ID:  # type: ignore
+            actual_system_prompt = constants.CODER_AI_SYSTEM_PROMPT  # type: ignore
             logger.info(f"CM: Using CODER_AI_SYSTEM_PROMPT for {backend_id}")
         if backend_id == "gemini_chat_default":
             api_key_to_use = get_gemini_api_key()
         elif backend_id == "gpt_chat_default":
             api_key_to_use = get_openai_api_key()
-        elif backend_id in [constants.GENERATOR_BACKEND_ID, "ollama_chat_default"]:
-            api_key_to_use = None
+        elif backend_id in [constants.GENERATOR_BACKEND_ID, "ollama_chat_default"]:  # type: ignore
+            api_key_to_use = None  # Ollama doesn't use API keys in the same way
         if backend_id in ["gemini_chat_default", "gpt_chat_default"] and not api_key_to_use:
             err_msg = f"{backend_id.split('_')[0].upper()} API Key not found. Set in .env"
             logger.error(err_msg)
@@ -202,15 +205,15 @@ class ChatManager(QObject):
             return
 
         user_msg_parts = [user_msg_txt] if user_msg_txt else []
-        if image_data: user_msg_parts.extend(image_data)
-        user_message = ChatMessage(role=USER_ROLE, parts=user_msg_parts)
+        if image_data: user_msg_parts.extend(image_data)  # type: ignore
+        user_message = ChatMessage(role=USER_ROLE, parts=user_msg_parts)  # type: ignore
         self._current_chat_history.append(user_message)
         self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, user_message)
         self._log_llm_comm("USER", user_msg_txt)
 
         if processed_input.intent == UserInputIntent.NORMAL_CHAT:
             if not self._is_chat_backend_configured:
-                err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
+                err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,  # type: ignore
                                           parts=["[Error: Chat Backend not ready.]"])
                 self._current_chat_history.append(err_msg_obj)
                 self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
@@ -220,25 +223,28 @@ class ChatManager(QObject):
 
             history_for_llm = self._current_chat_history[:]
             rag_context_str = ""
-            if self._rag_handler.should_perform_rag(user_msg_txt, self._is_rag_ready, self._is_rag_ready):
+            # MODIFICATION: Pass self._is_rag_ready (which reflects current context readiness)
+            if self._rag_handler.should_perform_rag(user_msg_txt, self._is_rag_ready,
+                                                    self._is_rag_ready):  # type: ignore
                 logger.info(f"CM: Performing RAG for query: '{user_msg_txt[:50]}'")
                 self._emit_status_update("Searching RAG context...", "#61afef", True, 1500)
-                query_entities = self._rag_handler.extract_code_entities(user_msg_txt)
-                rag_context_str, queried_collections = self._rag_handler.get_formatted_context(
+                query_entities = self._rag_handler.extract_code_entities(user_msg_txt)  # type: ignore
+                # MODIFICATION: Pass current project_id for project-specific RAG
+                rag_context_str, queried_collections = self._rag_handler.get_formatted_context(  # type: ignore
                     query=user_msg_txt,
                     query_entities=query_entities,
-                    project_id=self._current_project_id,  # Pass current project_id
+                    project_id=self._current_project_id,  # Explicitly pass current project ID
                     explicit_focus_paths=[],
                     implicit_focus_paths=[],
                     is_modification_request=False
                 )
                 if rag_context_str:
                     logger.info(f"CM: RAG context found from collections: {queried_collections}. Prepending to prompt.")
-                    rag_system_message = ChatMessage(role=SYSTEM_ROLE, parts=[rag_context_str],
+                    rag_system_message = ChatMessage(role=SYSTEM_ROLE, parts=[rag_context_str],  # type: ignore
                                                      metadata={"is_rag_context": True,
                                                                "queried_collections": queried_collections})
-                    history_for_llm.insert(-1, rag_system_message)
-                    rag_notification_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE,
+                    history_for_llm.insert(-1, rag_system_message)  # Insert before the last user message
+                    rag_notification_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE,  # type: ignore
                                                        parts=[
                                                            f"[System: RAG used. Context from: {', '.join(queried_collections)}.]"],
                                                        metadata={"is_internal": True})
@@ -253,14 +259,16 @@ class ChatManager(QObject):
                                                                                        history_for_llm, {
                                                                                            "temperature": self._active_temperature})
             if not success or not req_id:
-                err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[f"[Error sending: {err}]"])
+                err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
+                                          parts=[f"[Error sending: {err}]"])  # type: ignore
                 self._current_chat_history.append(err_msg_obj)
                 self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                               err_msg_obj)
                 self._emit_status_update(f"Failed to start chat: {err or 'Unknown'}", "#FF6B6B")
                 return
             self._current_llm_request_id = req_id
-            placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""], loading_state=MessageLoadingState.LOADING)
+            placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""],
+                                      loading_state=MessageLoadingState.LOADING)  # type: ignore
             self._current_chat_history.append(placeholder)
             self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           placeholder)
@@ -274,17 +282,18 @@ class ChatManager(QObject):
             if not self._is_chat_backend_configured or not self._is_specialized_backend_configured:
                 self._emit_status_update("Planner or Code LLM not configured.", "#e06c75", True, 5000)
                 return
-            self._plan_and_code_coordinator.start_planning_sequence(
+            self._plan_and_code_coordinator.start_planning_sequence(  # type: ignore
                 user_query=user_msg_txt,
                 planner_llm_backend_id=self._active_chat_backend_id,
                 planner_llm_model_name=self._active_chat_model_name,
                 planner_llm_temperature=self._active_temperature,
-                project_id=self._current_project_id, session_id=self._current_session_id,
+                # project_id=self._current_project_id, # PlanAndCodeCoordinator doesn't take these yet
+                # session_id=self._current_session_id,
                 specialized_llm_backend_id=self._active_specialized_backend_id,
                 specialized_llm_model_name=self._active_specialized_model_name
             )
         else:
-            unknown_intent_msg = ChatMessage(role=ERROR_ROLE,
+            unknown_intent_msg = ChatMessage(role=ERROR_ROLE,  # type: ignore
                                              parts=[f"[System: Unknown request type: {user_msg_txt[:50]}...]"])
             self._current_chat_history.append(unknown_intent_msg)
             if self._current_project_id and self._current_session_id:
@@ -303,60 +312,80 @@ class ChatManager(QObject):
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
         self._event_bus.createNewSessionForProjectRequested.emit(self._current_project_id)
 
-    @Slot(str, str)  # MODIFIED: Accept project_id from event
-    def request_rag_scan_directory(self, dir_path: str, project_id: str):
-        if not project_id:  # project_id must be valid for this operation
-            logger.error("CM: RAG scan requested without a valid project_id.")
-            self._emit_status_update("Cannot scan for RAG: Project ID missing.", "#e06c75", True, 3000)
-            return
-
-        # Check if the provided project_id matches the currently active one.
-        # This specific implementation assumes the scan is for the *active* project.
-        # If we wanted to allow scanning for non-active projects, this logic would change.
-        if project_id != self._current_project_id:
-            logger.warning(
-                f"CM: RAG scan requested for project '{project_id}', but active project is '{self._current_project_id}'. Scan will target '{project_id}'.")
-            # Potentially, we might want to prevent this or confirm with the user.
-            # For now, we allow it, but it's an important consideration.
-            # self._emit_status_update(f"Warning: Scanning for RAG for project '{project_id}', which is not active.", "#e5c07b", True, 5000)
-
+    @Slot(str)  # MODIFICATION: Slot for global RAG scan, only dir_path
+    def request_global_rag_scan_directory(self, dir_path: str):
         if not self._upload_service or not self._upload_service.is_vector_db_ready(
-                project_id):  # Check readiness for specific project
-            self._emit_status_update(f"RAG system not ready for project '{project_id}'. Cannot scan.", "#FF6B6B", True,
-                                     4000)
+                constants.GLOBAL_COLLECTION_ID):  # type: ignore
+            self._emit_status_update(f"RAG system not ready for Global Knowledge. Cannot scan.", "#FF6B6B", True, 4000)
             return
 
-        logger.info(f"CM: Requesting RAG scan for directory: {dir_path} for project: {project_id}")
-        self._emit_status_update(f"Scanning '{os.path.basename(dir_path)}' for RAG (Project: {project_id[:8]})...",
-                                 "#61afef", False)
+        logger.info(f"CM: Requesting GLOBAL RAG scan for directory: {dir_path}")
+        self._emit_status_update(f"Scanning '{os.path.basename(dir_path)}' for Global RAG...", "#61afef", False)
 
-        # Pass the project_id as the collection_id to UploadService
-        rag_message = self._upload_service.process_directory_for_context(dir_path, collection_id=project_id)
+        # Call UploadService with GLOBAL_COLLECTION_ID
+        rag_message = self._upload_service.process_directory_for_context(dir_path,
+                                                                         collection_id=constants.GLOBAL_COLLECTION_ID)  # type: ignore
 
-        if rag_message and self._current_project_id == project_id and self._current_session_id:  # Only add to current chat if it's for the active project
+        if rag_message and self._current_project_id and self._current_session_id:  # Add to current active chat
             self._current_chat_history.append(rag_message)
             self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           rag_message)
-            self._log_llm_comm(f"RAG_SCAN_P:{project_id[:6]}", rag_message.text)
-            if rag_message.role == ERROR_ROLE:
-                self._emit_status_update(f"RAG Scan for '{project_id[:8]}' completed with errors.", "#FF6B6B", True,
-                                         5000)
+            self._log_llm_comm(f"RAG_SCAN_GLOBAL", rag_message.text)  # type: ignore
+            if rag_message.role == ERROR_ROLE:  # type: ignore
+                self._emit_status_update(f"Global RAG Scan completed with errors.", "#FF6B6B", True, 5000)
             else:
-                self._emit_status_update(f"RAG Scan for '{project_id[:8]}' complete!", "#98c379", True, 3000)
-        elif rag_message:  # Scan was for a non-active project or no active session
+                self._emit_status_update(f"Global RAG Scan complete!", "#98c379", True, 3000)
+        elif rag_message:
             logger.info(
-                f"RAG Scan for project '{project_id}' completed. Message (not added to active chat): {rag_message.text}")
-            if rag_message.role == ERROR_ROLE:
-                self._emit_status_update(f"RAG Scan for '{project_id[:8]}' (non-active) completed with errors.",
+                f"Global RAG Scan completed. Message (not added to active chat): {rag_message.text}")  # type: ignore
+            # Status update for non-active chat context if needed
+        else:
+            self._emit_status_update(f"Global RAG Scan failed or returned no message.", "#FF6B6B", True, 3000)
+
+        self._check_rag_readiness_and_emit_status()  # Re-check RAG status
+
+    @Slot(list, str)  # NEW SLOT: For project-specific file uploads
+    def handle_project_files_upload_request(self, file_paths: List[str], project_id: str):
+        if not project_id:
+            logger.error("CM: Project RAG file upload requested without a project_id.")
+            self._emit_status_update("Cannot add files to project RAG: Project ID missing.", "#e06c75", True, 3000)
+            return
+
+        if not self._upload_service or not self._upload_service.is_vector_db_ready(project_id):  # type: ignore
+            self._emit_status_update(f"RAG system not ready for project '{project_id[:8]}...'. Cannot add files.",
+                                     "#FF6B6B", True, 4000)
+            return
+
+        logger.info(f"CM: Requesting Project RAG file upload for {len(file_paths)} files, project: {project_id}")
+        self._emit_status_update(f"Adding {len(file_paths)} files to RAG for project '{project_id[:8]}...'...",
+                                 "#61afef", False)
+
+        # Call UploadService with the specific project_id as collection_id
+        rag_message = self._upload_service.process_files_for_context(file_paths,
+                                                                     collection_id=project_id)  # type: ignore
+
+        # Add confirmation/error message to the chat of the *active* project if it matches the target project
+        if rag_message and self._current_project_id == project_id and self._current_session_id:
+            self._current_chat_history.append(rag_message)
+            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+                                                          rag_message)
+            self._log_llm_comm(f"RAG_UPLOAD_P:{project_id[:6]}", rag_message.text)  # type: ignore
+            if rag_message.role == ERROR_ROLE:  # type: ignore
+                self._emit_status_update(f"Project RAG file add for '{project_id[:8]}' completed with errors.",
                                          "#FF6B6B", True, 5000)
             else:
-                self._emit_status_update(f"RAG Scan for '{project_id[:8]}' (non-active) complete!", "#98c379", True,
+                self._emit_status_update(f"Project RAG file add for '{project_id[:8]}' complete!", "#98c379", True,
                                          3000)
+        elif rag_message:  # Files were added to a non-active project's RAG
+            logger.info(
+                f"Project RAG file add for project '{project_id}' completed. Message (not added to active chat): {rag_message.text}")  # type: ignore
+            self._emit_status_update(f"Files added to RAG for (non-active) project '{project_id[:8]}'.", "#56b6c2",
+                                     True, 4000)
         else:
-            self._emit_status_update(f"RAG Scan for '{project_id[:8]}' failed or returned no message.", "#FF6B6B", True,
-                                     3000)
+            self._emit_status_update(f"Project RAG file add for '{project_id[:8]}' failed or returned no message.",
+                                     "#FF6B6B", True, 3000)
 
-        self._check_rag_readiness_and_emit_status()
+        self._check_rag_readiness_and_emit_status()  # Re-check RAG status
 
     @Slot(str, str)
     def _handle_llm_request_sent(self, backend_id: str, request_id: str):
@@ -368,16 +397,17 @@ class ChatManager(QObject):
         meta_pid = usage_stats_dict.get("project_id")
         meta_sid = usage_stats_dict.get("session_id")
         if request_id == self._current_llm_request_id and meta_pid == self._current_project_id and meta_sid == self._current_session_id:
-            if isinstance(completed_message_obj, ChatMessage):
-                self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE", completed_message_obj.text)
+            if isinstance(completed_message_obj, ChatMessage):  # type: ignore
+                self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE",
+                                   completed_message_obj.text)  # type: ignore
                 updated = False
                 for i, msg in enumerate(self._current_chat_history):
-                    if msg.id == request_id:
-                        self._current_chat_history[i] = completed_message_obj
-                        self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
+                    if msg.id == request_id:  # type: ignore
+                        self._current_chat_history[i] = completed_message_obj  # type: ignore
+                        self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED  # type: ignore
                         updated = True;
                         break
-                if not updated: self._current_chat_history.append(completed_message_obj)
+                if not updated: self._current_chat_history.append(completed_message_obj)  # type: ignore
                 if self._current_project_id and self._current_session_id:
                     self._event_bus.messageFinalizedForSession.emit(self._current_project_id, self._current_session_id,
                                                                     request_id, completed_message_obj, usage_stats_dict,
@@ -392,10 +422,12 @@ class ChatManager(QObject):
         if request_id == self._current_llm_request_id:
             self._log_llm_comm(f"{self._active_chat_backend_id.upper()} ERROR", error_message_str)
             err_chat_msg = ChatMessage(id=request_id, role=ERROR_ROLE, parts=[f"[AI Error: {error_message_str}]"],
+                                       # type: ignore
                                        loading_state=MessageLoadingState.ERROR)
             updated = False
             for i, msg in enumerate(self._current_chat_history):
-                if msg.id == request_id: self._current_chat_history[i] = err_chat_msg; updated = True; break
+                if msg.id == request_id: self._current_chat_history[
+                    i] = err_chat_msg; updated = True; break  # type: ignore
             if not updated: self._current_chat_history.append(err_chat_msg)
             if self._current_project_id and self._current_session_id:
                 self._event_bus.messageFinalizedForSession.emit(self._current_project_id, self._current_session_id,
@@ -415,7 +447,7 @@ class ChatManager(QObject):
     def _handle_specialized_llm_selection_event(self, backend_id: str, model_name: str):
         if self._active_specialized_backend_id != backend_id or self._active_specialized_model_name != model_name:
             self._active_specialized_backend_id, self._active_specialized_model_name = backend_id, model_name
-            self._configure_backend(backend_id, model_name, constants.CODER_AI_SYSTEM_PROMPT)
+            self._configure_backend(backend_id, model_name, constants.CODER_AI_SYSTEM_PROMPT)  # type: ignore
 
     @Slot(str, str)
     def _handle_personality_change_event(self, new_prompt: str, backend_id_for_persona: str):
@@ -425,47 +457,66 @@ class ChatManager(QObject):
                                     self._active_chat_personality_prompt)
 
     def _check_rag_readiness_and_emit_status(self):
+        # MODIFICATION: Dynamic RAG readiness check
         if not self._upload_service or not hasattr(self._upload_service,
                                                    '_vector_db_service') or not self._upload_service._vector_db_service:  # type: ignore
             self._is_rag_ready = False
             self._event_bus.ragStatusChanged.emit(False, "RAG Not Ready (Service Error)", "#e06c75")
             return
 
-        rag_ready_for_project = False
         rag_status_message = "RAG Status: Initializing..."
-        rag_status_color = constants.TIMESTAMP_COLOR_HEX  # Muted color
+        rag_status_color = constants.TIMESTAMP_COLOR_HEX  # type: ignore
+        current_context_rag_ready = False
 
-        if not self._current_project_id:
-            rag_status_message = "RAG Status: No Active Project"
-            self._is_rag_ready = False  # Overall RAG readiness is tied to active project for project-specific RAG
-        elif not self._upload_service.is_vector_db_ready(self._current_project_id):  # Check specific project
-            rag_status_message = f"RAG Not Ready for '{self._current_project_id[:8]}...' (DB Error)"
-            rag_status_color = "#e06c75"  # Red
-            self._is_rag_ready = False
-        elif not self._upload_service._dependencies_ready:  # type: ignore
-            rag_status_message = "RAG Not Ready (Dependencies Missing)"
-            rag_status_color = "#e06c75"  # Red
-            self._is_rag_ready = False
-        else:
-            project_collection_size = self._upload_service._vector_db_service.get_collection_size(
-                self._current_project_id)  # type: ignore
-            if project_collection_size == -1:  # Error fetching size
-                rag_status_message = f"RAG Status for '{self._current_project_id[:8]}...': DB Error"
-                rag_status_color = "#e06c75"  # Red
-                self._is_rag_ready = False  # If we can't get size, assume not fully ready
-            elif project_collection_size == 0:
-                rag_status_message = f"RAG Ready for '{self._current_project_id[:8]}...' (Empty)"
-                rag_status_color = "#e5c07b"  # Yellow for ready but empty
-                rag_ready_for_project = True
-                self._is_rag_ready = True
+        if not self._current_project_id:  # No active project, check GLOBAL RAG
+            if not self._upload_service.is_vector_db_ready(constants.GLOBAL_COLLECTION_ID):  # type: ignore
+                rag_status_message = "Global RAG: DB Error"
+                rag_status_color = "#e06c75"
+            elif not self._upload_service._dependencies_ready:  # type: ignore
+                rag_status_message = "Global RAG: Dependencies Missing"
+                rag_status_color = "#e06c75"
             else:
-                rag_status_message = f"RAG Ready for '{self._current_project_id[:8]}...' ({project_collection_size} chunks)"
-                rag_status_color = "#98c379"  # Green
-                rag_ready_for_project = True
-                self._is_rag_ready = True
+                global_size = self._upload_service._vector_db_service.get_collection_size(
+                    constants.GLOBAL_COLLECTION_ID)  # type: ignore
+                if global_size == -1:
+                    rag_status_message = "Global RAG: DB Error"
+                    rag_status_color = "#e06c75"
+                elif global_size == 0:
+                    rag_status_message = "Global RAG: Ready (Empty)"
+                    rag_status_color = "#e5c07b"
+                    current_context_rag_ready = True
+                else:
+                    rag_status_message = f"Global RAG: Ready ({global_size} chunks)"
+                    rag_status_color = "#98c379"
+                    current_context_rag_ready = True
+        else:  # Active project, check project-specific RAG
+            project_name_display = self._project_manager.get_project_by_id(self._current_project_id)  # type: ignore
+            project_display_name = project_name_display.name[:15] if project_name_display else self._current_project_id[
+                                                                                               :8]
 
-        logger.info(
-            f"CM: Emitting RAG Status: Ready={self._is_rag_ready}, ProjectReady={rag_ready_for_project}, Msg='{rag_status_message}'")
+            if not self._upload_service.is_vector_db_ready(self._current_project_id):  # type: ignore
+                rag_status_message = f"RAG for '{project_display_name}...': DB Error"
+                rag_status_color = "#e06c75"
+            elif not self._upload_service._dependencies_ready:  # type: ignore
+                rag_status_message = f"RAG for '{project_display_name}...': Dependencies Missing"
+                rag_status_color = "#e06c75"
+            else:
+                project_size = self._upload_service._vector_db_service.get_collection_size(
+                    self._current_project_id)  # type: ignore
+                if project_size == -1:
+                    rag_status_message = f"RAG for '{project_display_name}...': DB Error"
+                    rag_status_color = "#e06c75"
+                elif project_size == 0:
+                    rag_status_message = f"RAG for '{project_display_name}...': Ready (Empty)"
+                    rag_status_color = "#e5c07b"
+                    current_context_rag_ready = True
+                else:
+                    rag_status_message = f"RAG for '{project_display_name}...': Ready ({project_size} chunks)"
+                    rag_status_color = "#98c379"
+                    current_context_rag_ready = True
+
+        self._is_rag_ready = current_context_rag_ready  # Update the general flag based on current context
+        logger.info(f"CM: Emitting RAG Status: OverallReady={self._is_rag_ready}, Msg='{rag_status_message}'")
         self._event_bus.ragStatusChanged.emit(self._is_rag_ready, rag_status_message, rag_status_color)
 
     def set_model_for_backend(self, backend_id: str, model_name: str):
@@ -479,7 +530,7 @@ class ChatManager(QObject):
         if 0.0 <= temperature <= 2.0: self._active_temperature = temperature; self._emit_status_update(
             f"Temp: {temperature:.2f}", "#61afef", True, 1500)
 
-    def get_current_chat_history(self) -> List[ChatMessage]:
+    def get_current_chat_history(self) -> List[ChatMessage]:  # type: ignore
         return self._current_chat_history
 
     def get_current_project_id(self) -> Optional[str]:
@@ -515,7 +566,7 @@ class ChatManager(QObject):
         return self._active_chat_personality_prompt
 
     def get_current_specialized_personality(self) -> Optional[str]:
-        return constants.CODER_AI_SYSTEM_PROMPT
+        return constants.CODER_AI_SYSTEM_PROMPT  # type: ignore
 
     def get_current_chat_temperature(self) -> float:
         return self._active_temperature
@@ -527,28 +578,28 @@ class ChatManager(QObject):
         return self._is_specialized_backend_configured
 
     def is_rag_ready(self) -> bool:
-        # This now reflects readiness for the *active project* or "no active project"
         return self._is_rag_ready
 
     def is_overall_busy(self) -> bool:
         return bool(self._current_llm_request_id) or self._backend_coordinator.is_any_backend_busy()
 
-    def get_llm_communication_logger(self) -> Optional[LlmCommunicationLogger]:
+    def get_llm_communication_logger(self) -> Optional[LlmCommunicationLogger]:  # type: ignore
         return self._llm_comm_logger
 
-    def get_backend_coordinator(self) -> BackendCoordinator:
+    def get_backend_coordinator(self) -> BackendCoordinator:  # type: ignore
         return self._backend_coordinator
 
-    def get_project_manager(self) -> ProjectManager:
+    def get_project_manager(self) -> ProjectManager:  # type: ignore
         return self._project_manager
 
-    def get_upload_service(self) -> UploadService:
-        return self._upload_service
+    def get_upload_service(self) -> UploadService:  # type: ignore
+        return self._upload_service  # type: ignore
 
-    def get_rag_handler(self) -> RagHandler:
-        return self._rag_handler
+    def get_rag_handler(self) -> RagHandler:  # type: ignore
+        return self._rag_handler  # type: ignore
 
     def cleanup_phase1(self):
         logger.info("ChatManager cleanup...")
         if self._current_llm_request_id: self._backend_coordinator.cancel_current_task(
             self._current_llm_request_id); self._current_llm_request_id = None
+

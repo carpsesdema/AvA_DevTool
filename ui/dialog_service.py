@@ -11,6 +11,8 @@ try:
     from ui.dialogs.llm_terminal_window import LlmTerminalWindow
     from ui.dialogs.personality_dialog import EditPersonalityDialog
     from ui.dialogs.code_viewer_dialog import CodeViewerWindow
+    # MODIFICATION: Import the new ProjectRagDialog
+    from ui.dialogs.project_rag_dialog import ProjectRagDialog
 except ImportError as e_ds:
     logging.getLogger(__name__).critical(f"Critical import error in DialogService: {e_ds}", exc_info=True)
     raise
@@ -35,6 +37,7 @@ class DialogService(QObject):
 
         self._llm_terminal_window: Optional[LlmTerminalWindow] = None
         self._code_viewer_window: Optional[CodeViewerWindow] = None
+        self._project_rag_dialog: Optional[ProjectRagDialog] = None  # MODIFICATION: Add instance variable
 
         self._connect_event_bus_subscriptions_phase1()
         logger.info("DialogService (Phase 1) initialized and connected to EventBus.")
@@ -44,18 +47,24 @@ class DialogService(QObject):
         bus.showLlmLogWindowRequested.connect(self.show_llm_terminal_window)
         bus.chatLlmPersonalityEditRequested.connect(self.trigger_edit_personality_dialog)
         bus.viewCodeViewerRequested.connect(lambda: self.show_code_viewer(ensure_creation=True))
+        # MODIFICATION: Add subscription to show Project RAG Dialog
+        # This signal will be emitted by LeftControlPanel's button
+        # An alternative would be for LeftControlPanel to call a method on DialogService directly.
+        # For now, let's assume an event `showProjectRagDialogRequested` which needs to be added to EventBus.
+        # Or, more simply, LeftPanel will call `trigger_show_project_rag_dialog` directly.
+        # Let's assume direct call for now, so no new event bus connection here for *triggering* it.
 
     def show_llm_terminal_window(self, ensure_creation: bool = True) -> Optional[LlmTerminalWindow]:
         logger.debug(f"DialogService: Request to show LLM terminal window (ensure_creation={ensure_creation}).")
         try:
             if self._llm_terminal_window is None and ensure_creation:
-                self._llm_terminal_window = LlmTerminalWindow(parent=None)
+                self._llm_terminal_window = LlmTerminalWindow(parent=None)  # Parent None for top-level
                 logger.info("DialogService: Created new LlmTerminalWindow instance.")
                 if hasattr(self.chat_manager, 'get_llm_communication_logger') and \
                         (llm_logger := self.chat_manager.get_llm_communication_logger()):
                     try:
                         llm_logger.new_terminal_log_entry.disconnect(self._llm_terminal_window.add_log_entry)
-                    except TypeError:  # Was not connected
+                    except (TypeError, RuntimeError):  # Was not connected or already disconnected
                         pass
                     llm_logger.new_terminal_log_entry.connect(self._llm_terminal_window.add_log_entry)
                     logger.info("DialogService: Connected LLM logger to new LlmTerminalWindow.")
@@ -74,10 +83,8 @@ class DialogService(QObject):
         logger.debug(f"DialogService: Request to show Code Viewer (ensure_creation={ensure_creation}).")
         try:
             if self._code_viewer_window is None and ensure_creation:
-                self._code_viewer_window = CodeViewerWindow(parent=self.parent_window)
+                self._code_viewer_window = CodeViewerWindow(parent=self.parent_window)  # Parent is main window
                 logger.info("DialogService: Created new CodeViewerWindow instance.")
-                # Connect apply_change_requested from CodeViewerWindow to the EventBus
-                # This assumes CodeViewerWindow has a signal named 'apply_change_requested'
                 if hasattr(self._code_viewer_window, 'apply_change_requested'):
                     self._code_viewer_window.apply_change_requested.connect(
                         lambda proj_id, rel_fp, content, focus_p:
@@ -120,18 +127,64 @@ class DialogService(QObject):
             QMessageBox.critical(self.parent_window, "Dialog Error",
                                  f"Could not open Personality Editor:\n{e_pers_dlg}")
 
+    # MODIFICATION: New method to show the Project RAG Dialog
+    @Slot()
+    def trigger_show_project_rag_dialog(self):
+        logger.debug("DialogService: Request to show Project RAG File Add dialog.")
+        project_manager = self.chat_manager.get_project_manager()
+        if not project_manager:
+            logger.error("DialogService: ProjectManager not available via ChatManager.")
+            QMessageBox.critical(self.parent_window, "Error", "Project manager is not available.")
+            return
+
+        current_project = project_manager.get_current_project()
+        if not current_project:
+            logger.warning("DialogService: No active project to add RAG files to.")
+            QMessageBox.information(self.parent_window, "No Active Project",
+                                    "Please select or create a project before adding files to its knowledge base.")
+            return
+
+        try:
+            # We can reuse the dialog instance or create a new one each time.
+            # For modal dialogs that don't retain much state beyond the call, creating new is often cleaner.
+            self._project_rag_dialog = ProjectRagDialog(
+                project_id=current_project.id,
+                project_name=current_project.name,
+                parent=self.parent_window
+            )
+            logger.info(f"DialogService: Created/Reused ProjectRagDialog for project '{current_project.name}'.")
+
+            # exec_() is blocking, dialog handles emitting signal if files are confirmed
+            self._project_rag_dialog.exec()
+            # No need to check result here, dialog emits event on accept.
+
+        except Exception as e_pr_dlg:
+            logger.error(f"Error showing ProjectRagDialog: {e_pr_dlg}", exc_info=True)
+            QMessageBox.critical(self.parent_window, "Dialog Error",
+                                 f"Could not open Project RAG File Dialog:\n{e_pr_dlg}")
+
     def close_non_modal_dialogs(self):
         logger.info("DialogService attempting to close non-modal dialogs.")
-        if self._llm_terminal_window:
+        if self._llm_terminal_window and self._llm_terminal_window.isVisible():
             try:
-                self._llm_terminal_window.close()
+                self._llm_terminal_window.close()  # close() on QWidget hides it by default
                 logger.debug("  LLM Terminal window close requested.")
             except Exception as e_close_llm:
                 logger.error(f"Error closing LlmTerminalWindow: {e_close_llm}")
 
-        if self._code_viewer_window:
+        if self._code_viewer_window and self._code_viewer_window.isVisible():
             try:
-                self._code_viewer_window.close()
-                logger.debug(" Code Viewer window close requested.")
+                self._code_viewer_window.close()  # close() on QWidget hides it by default
+                logger.debug("  Code Viewer window close requested.")
             except Exception as e_close_cv:
                 logger.error(f"Error closing CodeViewerWindow: {e_close_cv}")
+
+        # ProjectRagDialog is modal (uses exec()), so it doesn't need to be in close_non_modal_dialogs.
+        # If it were non-modal, we'd add:
+        # if self._project_rag_dialog and self._project_rag_dialog.isVisible():
+        #     try:
+        #         self._project_rag_dialog.close()
+        #         logger.debug("  Project RAG Dialog close requested.")
+        #     except Exception as e_close_prd:
+        #         logger.error(f"Error closing ProjectRagDialog: {e_close_prd}")
+

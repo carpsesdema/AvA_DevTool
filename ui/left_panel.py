@@ -25,9 +25,11 @@ try:
     from core.event_bus import EventBus
     from core.chat_manager import ChatManager
     from services.project_service import Project, ChatSession  # For type hinting
+    # Assuming DialogService might be accessed via parent, or an event is used.
+    # For direct call, MainWindow needs to expose it.
+    # from ui.dialog_service import DialogService # Not directly imported if accessed via parent
 except ImportError as e_lp:
     logging.getLogger(__name__).critical(f"Critical import error in LeftPanel: {e_lp}", exc_info=True)
-    # Fallback types for when imports fail during development/CI
     Project = type("Project", (object,), {})  # type: ignore
     ChatSession = type("ChatSession", (object,), {})  # type: ignore
     raise
@@ -86,7 +88,7 @@ class LeftControlPanel(QWidget):
         self.llm_config_group = QGroupBox("LLM Configuration")
         self.actions_group = QGroupBox("Chat Actions")
         self.projects_group = QGroupBox("Projects & Sessions")
-        self.rag_group = QGroupBox("RAG Actions")
+        self.rag_group = QGroupBox("Knowledge Base (RAG)")
 
         for group_box in [self.llm_config_group, self.actions_group, self.projects_group,
                           self.rag_group]:
@@ -165,13 +167,21 @@ class LeftControlPanel(QWidget):
         self.new_project_button.setIconSize(self.button_icon_size)
 
     def _init_rag_widgets(self):
-        self.scan_rag_directory_button = QPushButton(" Scan Directory for RAG")
-        self.scan_rag_directory_button.setFont(self.button_font)
-        self.scan_rag_directory_button.setIcon(self._get_qta_icon('fa5s.search-plus', color="#E0B6FF"))
-        self.scan_rag_directory_button.setToolTip("Scan a directory and add its files to the RAG database for the current project")
-        self.scan_rag_directory_button.setObjectName("scanRagDirectoryButton")
-        self.scan_rag_directory_button.setStyleSheet(self.button_style_sheet)
-        self.scan_rag_directory_button.setIconSize(self.button_icon_size)
+        self.scan_global_rag_directory_button = QPushButton(" Scan Directory (Global RAG)")
+        self.scan_global_rag_directory_button.setFont(self.button_font)
+        self.scan_global_rag_directory_button.setIcon(self._get_qta_icon('fa5s.globe-americas', color="#E0B6FF"))
+        self.scan_global_rag_directory_button.setToolTip("Scan a directory to add its files to the GLOBAL knowledge base.")
+        self.scan_global_rag_directory_button.setObjectName("scanGlobalRagDirectoryButton")
+        self.scan_global_rag_directory_button.setStyleSheet(self.button_style_sheet)
+        self.scan_global_rag_directory_button.setIconSize(self.button_icon_size)
+
+        self.add_project_files_button = QPushButton(" Add Files (Project RAG)")
+        self.add_project_files_button.setFont(self.button_font)
+        self.add_project_files_button.setIcon(self._get_qta_icon('fa5s.file-medical', color="#61AFEF"))
+        self.add_project_files_button.setToolTip("Add specific files to the current project's knowledge base.")
+        self.add_project_files_button.setObjectName("addProjectFilesButton")
+        self.add_project_files_button.setStyleSheet(self.button_style_sheet)
+        self.add_project_files_button.setIconSize(self.button_icon_size)
 
         self.rag_status_label = QLabel("RAG Status: Initializing...")
         self.rag_status_label.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 2))
@@ -204,8 +214,9 @@ class LeftControlPanel(QWidget):
         main_layout.addWidget(self.llm_config_group)
 
         rag_actions_layout = QVBoxLayout(self.rag_group)
-        rag_actions_layout.setSpacing(6)
-        rag_actions_layout.addWidget(self.scan_rag_directory_button)
+        rag_actions_layout.setSpacing(8)
+        rag_actions_layout.addWidget(self.scan_global_rag_directory_button)
+        rag_actions_layout.addWidget(self.add_project_files_button)
         rag_actions_layout.addWidget(self.rag_status_label)
         main_layout.addWidget(self.rag_group)
 
@@ -244,7 +255,8 @@ class LeftControlPanel(QWidget):
             self._project_manager.sessionSwitched.connect(self._handle_session_switched)
 
     def _connect_rag_signals(self):
-        self.scan_rag_directory_button.clicked.connect(self._on_scan_rag_directory_requested)
+        self.scan_global_rag_directory_button.clicked.connect(self._on_scan_global_rag_directory_requested)
+        self.add_project_files_button.clicked.connect(self._on_add_project_files_requested)
         self._event_bus.ragStatusChanged.connect(self._handle_rag_status_changed)
 
     def load_initial_projects_and_sessions(self):
@@ -259,10 +271,10 @@ class LeftControlPanel(QWidget):
         else:
             self.sessions_list_widget.clear()
         self.set_enabled_state(
-            enabled=self.chat_manager.is_api_ready(),
-            is_busy=self.chat_manager.is_overall_busy()
+            is_api_ready=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy(),
+            is_rag_ready=self.chat_manager.is_rag_ready()
         )
-
 
     @Slot()
     def _on_new_project_requested(self):
@@ -273,24 +285,30 @@ class LeftControlPanel(QWidget):
             logger.info("New project creation cancelled or empty name.")
 
     @Slot()
-    def _on_scan_rag_directory_requested(self):
-        logger.info("LCP: 'Scan Directory for RAG' button clicked.")
-
-        current_project = self._project_manager.get_current_project()
-        if not current_project:
-            logger.warning("LCP: RAG scan requested but no project is active.")
-            self._event_bus.uiErrorGlobal.emit("A project must be active to scan for RAG.", True)
-            return
-
-        project_id = current_project.id
-        directory = QFileDialog.getExistingDirectory(self, "Select Directory to Scan for Project RAG",
+    def _on_scan_global_rag_directory_requested(self):
+        logger.info("LCP: 'Scan Directory (Global RAG)' button clicked.")
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory for Global RAG",
                                                      os.path.expanduser("~"))
-
         if directory:
-            logger.info(f"LCP: User selected directory for RAG scan: {directory} for project {project_id}")
-            self._event_bus.requestRagScanDirectory.emit(directory, project_id)
+            logger.info(f"LCP: User selected directory for GLOBAL RAG scan: {directory}")
+            self._event_bus.requestRagScanDirectory.emit(directory) # Emits only dir_path
         else:
-            logger.info("LCP: RAG directory scan selection cancelled.")
+            logger.info("LCP: Global RAG directory scan selection cancelled.")
+
+    @Slot()
+    def _on_add_project_files_requested(self):
+        logger.info("LCP: 'Add Files (Project RAG)' button clicked.")
+        # MODIFICATION: This will now call the DialogService to show the ProjectRagDialog
+        parent_window = self.parent() # Assuming MainWindow is the parent
+        if parent_window and hasattr(parent_window, 'dialog_service') and \
+           hasattr(parent_window.dialog_service, 'trigger_show_project_rag_dialog'):
+            logger.debug("LCP: Calling DialogService to show Project RAG dialog.")
+            parent_window.dialog_service.trigger_show_project_rag_dialog()
+        else:
+            logger.error("LCP: Could not find DialogService or trigger_show_project_rag_dialog method on parent."
+                         " Project RAG dialog cannot be shown.")
+            self._event_bus.uiErrorGlobal.emit("Cannot open project RAG dialog: Internal setup error.", False)
+
 
     @Slot(QListWidgetItem, QListWidgetItem)
     def _on_project_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]):
@@ -337,6 +355,7 @@ class LeftControlPanel(QWidget):
             item.setToolTip(project.description or project.name)
             self.projects_list_widget.addItem(item)
             self._is_programmatic_selection_change = False
+            self.projects_list_widget.setCurrentItem(item)
 
     @Slot(str)
     def _handle_project_switched(self, project_id: str):
@@ -344,8 +363,9 @@ class LeftControlPanel(QWidget):
         self._select_project_in_list(project_id)
         self.update_sessions_list(project_id)
         self.set_enabled_state(
-            enabled=self.chat_manager.is_api_ready(),
-            is_busy=self.chat_manager.is_overall_busy()
+            is_api_ready=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy(),
+            is_rag_ready=self.chat_manager.is_rag_ready()
         )
 
     @Slot(str, str)
@@ -359,6 +379,7 @@ class LeftControlPanel(QWidget):
                 item.setData(self.SESSION_ID_ROLE, session.id)
                 self.sessions_list_widget.addItem(item)
                 self._is_programmatic_selection_change = False
+                self.sessions_list_widget.setCurrentItem(item)
 
     @Slot(str, str)
     def _handle_session_switched(self, project_id: str, session_id: str):
@@ -367,10 +388,10 @@ class LeftControlPanel(QWidget):
         if current_project and current_project.id == project_id:
             self._select_session_in_list(session_id)
         self.set_enabled_state(
-            enabled=self.chat_manager.is_api_ready(),
-            is_busy=self.chat_manager.is_overall_busy()
+            is_api_ready=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy(),
+            is_rag_ready=self.chat_manager.is_rag_ready()
         )
-
 
     def _select_project_in_list(self, project_id_to_select: str):
         self._is_programmatic_selection_change = True
@@ -408,7 +429,7 @@ class LeftControlPanel(QWidget):
         elif sessions:
             self._select_session_in_list(sessions[0].id)
             if not current_session_obj or current_session_obj.id != sessions[0].id:
-                self._project_manager.switch_to_session(sessions[0].id)
+                 self._project_manager.switch_to_session(sessions[0].id)
         self._is_programmatic_selection_change = False
 
     def _load_initial_model_settings_phase1(self):
@@ -438,7 +459,11 @@ class LeftControlPanel(QWidget):
         self._is_programmatic_model_change = False
         self.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
         self.chat_manager._check_rag_readiness_and_emit_status()
-        self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
+        self.set_enabled_state(
+            is_api_ready=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy(),
+            is_rag_ready=self.chat_manager.is_rag_ready()
+        )
 
     def _populate_chat_llm_combo_box_phase1(self):
         self.chat_llm_combo_box.clear()
@@ -524,30 +549,42 @@ class LeftControlPanel(QWidget):
         self.chat_llm_combo_box.blockSignals(False); self.specialized_llm_combo_box.blockSignals(False)
         self._is_programmatic_model_change = False
         self.update_personality_tooltip(active=bool(self.chat_manager.get_current_chat_personality()))
-        self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
+        self.set_enabled_state(
+            is_api_ready=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy(),
+            is_rag_ready=self.chat_manager.is_rag_ready()
+        )
 
     @Slot(bool, str, str)
     def _handle_rag_status_changed(self, is_ready: bool, status_text: str, status_color: str):
         logger.debug(f"LCP: RAG Status Changed: Ready={is_ready}, Text='{status_text}', Color='{status_color}'")
-        self.rag_status_label.setText(f"RAG Status: {status_text}")
+        self.rag_status_label.setText(f"{status_text}")
         self.rag_status_label.setStyleSheet(f"QLabel#RagStatusLabel {{ color: {status_color}; }}")
-        self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=self.chat_manager.is_overall_busy())
+        self.set_enabled_state(
+            is_api_ready=self.chat_manager.is_api_ready(),
+            is_busy=self.chat_manager.is_overall_busy(),
+            is_rag_ready=is_ready
+        )
 
     @Slot(bool)
     def _handle_backend_busy_state_changed_event_phase1(self, is_busy: bool):
-        self.set_enabled_state(enabled=self.chat_manager.is_api_ready(), is_busy=is_busy)
+        self.set_enabled_state(
+            is_api_ready=self.chat_manager.is_api_ready(),
+            is_busy=is_busy,
+            is_rag_ready=self.chat_manager.is_rag_ready()
+        )
 
     def update_personality_tooltip(self, active: bool):
         tooltip_base = "Customize AI personality / system prompt (Ctrl+P)"
         status = "(Custom Persona Active)" if active else "(Default Persona)"
         self.configure_ai_personality_button.setToolTip(f"{tooltip_base}\nStatus: {status}")
 
-    def set_enabled_state(self, enabled: bool, is_busy: bool):
-        effective_enabled_not_busy = enabled and not is_busy
+    def set_enabled_state(self, is_api_ready: bool, is_busy: bool, is_rag_ready: bool):
+        effective_enabled_not_busy = is_api_ready and not is_busy
         is_project_active = self.chat_manager.get_current_project_id() is not None
 
-        self.chat_llm_combo_box.setEnabled(enabled)
-        self.specialized_llm_combo_box.setEnabled(enabled)
+        self.chat_llm_combo_box.setEnabled(is_api_ready)
+        self.specialized_llm_combo_box.setEnabled(is_api_ready)
         self.configure_ai_personality_button.setEnabled(effective_enabled_not_busy)
 
         self.new_chat_button.setEnabled(not is_busy and is_project_active)
@@ -558,8 +595,10 @@ class LeftControlPanel(QWidget):
         self.sessions_list_widget.setEnabled(not is_busy and is_project_active)
         self.new_project_button.setEnabled(not is_busy)
 
-        self.scan_rag_directory_button.setEnabled(not is_busy and self.chat_manager.is_rag_ready() and is_project_active)
+        self.scan_global_rag_directory_button.setEnabled(not is_busy and is_rag_ready)
+        self.add_project_files_button.setEnabled(not is_busy and is_rag_ready and is_project_active)
 
-        label_color = "#C0C0C0" if enabled else "#707070"
+        label_color = "#C0C0C0" if is_api_ready else "#707070"
         self.chat_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")
         self.specialized_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")
+
