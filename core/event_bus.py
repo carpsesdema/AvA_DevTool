@@ -15,7 +15,8 @@ class EventBus(QObject):
     chatLlmPersonalitySubmitted = Signal(str, str)  # new_prompt, backend_id_for_persona
     chatLlmSelectionChanged = Signal(str, str)  # backend_id, model_name
     specializedLlmSelectionChanged = Signal(str, str)  # backend_id, model_name
-    requestRagScanDirectory = Signal(str, str) # NEW: Request a RAG scan for a directory (dir_path, project_id)
+    # MODIFIED: Reverted to only dir_path for the global RAG scan
+    requestRagScanDirectory = Signal(str) # for dir_path (targets GLOBAL RAG)
 
     # ADDED: Orchestrator-level request for new session
     createNewSessionForProjectRequested = Signal(str)  # project_id (ChatManager emits this)
@@ -50,8 +51,7 @@ class EventBus(QObject):
     uiTextCopied = Signal(str, str)
     uiInputBarBusyStateChanged = Signal(bool)
     backendBusyStateChanged = Signal(bool)
-    ragStatusChanged = Signal(bool, str, str) # NEW: RAG system readiness status (is_ready, status_text, status_color)
-
+    ragStatusChanged = Signal(bool, str, str) # RAG status still reflects project-specific readiness for display
 
     # Code Generation / Modification Flow
     modificationFileReadyForDisplay = Signal(str, str)
