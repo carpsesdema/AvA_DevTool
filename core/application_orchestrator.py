@@ -12,8 +12,9 @@ try:
     from backends.backend_coordinator import BackendCoordinator
     from core.event_bus import EventBus
     from services.llm_communication_logger import LlmCommunicationLogger
-    from services.upload_service import UploadService  # ADDED
-    from core.rag_handler import RagHandler  # ADDED
+    from services.upload_service import UploadService
+    from services.terminal_service import TerminalService  # NEW
+    from core.rag_handler import RagHandler
     from utils import constants
     from services.project_service import ProjectManager, Project, ChatSession
     from core.models import ChatMessage
@@ -22,6 +23,7 @@ except ImportError as e:
     ChatMessage = type("ChatMessage", (object,), {})  # type: ignore
     UploadService = type("UploadService", (object,), {})  # type: ignore
     RagHandler = type("RagHandler", (object,), {})  # type: ignore
+    TerminalService = type("TerminalService", (object,), {})  # type: ignore
     logging.getLogger(__name__).critical(f"Critical import error in ApplicationOrchestrator: {e}", exc_info=True)
     raise
 
@@ -35,7 +37,7 @@ logger = logging.getLogger(__name__)
 class ApplicationOrchestrator(QObject):
     def __init__(self,
                  project_manager: ProjectManager,  # type: ignore
-                 parent: Optional[QObject] = None):  # Removed upload_service_placeholder from signature
+                 parent: Optional[QObject] = None):
         super().__init__(parent)
         logger.info("ApplicationOrchestrator initializing...")
 
@@ -82,28 +84,30 @@ class ApplicationOrchestrator(QObject):
             logger.critical(f"An unexpected error occurred instantiating BackendCoordinator: {e_bc}", exc_info=True)
             raise
 
-        # --- RAG Services (NEW) ---
-        # Initialize with safe defaults in case services fail
+        # --- RAG Services ---
         self.upload_service = None
         self.rag_handler = None
 
         try:
-            # UploadService internally manages FileHandler, Chunking, CodeAnalysis, and VectorDB (Chroma)
             self.upload_service = UploadService()
-            # Check if upload_service initialized correctly and has the _vector_db_service attribute
-            vector_db_service = getattr(self.upload_service, '_vector_db_service',
-                                        None) if self.upload_service else None
-
-            # Initialize RagHandler with potentially None services, it will handle them gracefully
+            vector_db_service = getattr(self.upload_service, '_vector_db_service', None) if self.upload_service else None
             self.rag_handler = RagHandler(self.upload_service, vector_db_service)
             logger.info("RAG services initialized successfully")
-
         except Exception as e_rag:
             logger.error(f"Failed to initialize RAG services: {e_rag}. RAG functionality will be disabled.")
-            # Ensure upload_service and rag_handler are set to None if initialization failed
             self.upload_service = None
             self.rag_handler = None
 
+        # --- NEW: Terminal Service ---
+        self.terminal_service = None
+        try:
+            self.terminal_service = TerminalService(parent=self)
+            logger.info("TerminalService initialized successfully")
+        except Exception as e_terminal:
+            logger.error(f"Failed to initialize TerminalService: {e_terminal}. Terminal functionality will be disabled.")
+            self.terminal_service = None
+
+        # --- LLM Communication Logger ---
         self.llm_communication_logger: Optional[LlmCommunicationLogger] = None
         try:
             self.llm_communication_logger = LlmCommunicationLogger(parent=self)
@@ -119,9 +123,9 @@ class ApplicationOrchestrator(QObject):
 
     def _connect_event_bus(self):
         self.event_bus.createNewSessionForProjectRequested.connect(self._handle_create_new_session_requested)
-        self.event_bus.createNewProjectRequested.connect(self._handle_create_new_project_requested)  # ADDED THIS LINE
+        self.event_bus.createNewProjectRequested.connect(self._handle_create_new_project_requested)
         self.event_bus.messageFinalizedForSession.connect(self._handle_message_finalized_for_session_persistence)
-        if hasattr(self.project_manager, 'projectDeleted'):  # Check if signal exists before connecting
+        if hasattr(self.project_manager, 'projectDeleted'):
             self.project_manager.projectDeleted.connect(self._handle_project_deleted)  # type: ignore
         else:
             logger.warning("ProjectManager does not have projectDeleted signal. Cannot connect in Orchestrator.")
@@ -150,13 +154,12 @@ class ApplicationOrchestrator(QObject):
             if not active_session and active_project:
                 logger.info(f"Orchestrator: Project '{active_project.name}' has no active session. Creating one.")
                 active_session = self.project_manager.create_session(active_project.id, "Main Chat")  # type: ignore
-                if active_session:  # Check if session creation was successful
+                if active_session:
                     self.project_manager.switch_to_session(active_session.id)  # type: ignore
 
         if active_project and active_session:
             logger.info(
                 f"Orchestrator: Setting active session in ChatManager: P:{active_project.id}/S:{active_session.id}")
-            # Ensure ChatMessage type is correctly handled if it was conditionally imported
             history_to_set: List[ChatMessage] = active_session.message_history  # type: ignore
             self.chat_manager.set_active_session(active_project.id, active_session.id, history_to_set)
         else:
@@ -164,7 +167,7 @@ class ApplicationOrchestrator(QObject):
                 "Orchestrator: Failed to initialize or load a project/session. Chat functionality may be limited.")
             self.event_bus.uiErrorGlobal.emit("Failed to load or create an initial project/session.", True)
 
-    @Slot(str, str)  # ADDED THIS MISSING METHOD
+    @Slot(str, str)
     def _handle_create_new_project_requested(self, project_name: str, project_description: str):
         """Handle request to create a new project."""
         logger.info(f"Orchestrator: Request to create new project: '{project_name}'")
@@ -175,7 +178,6 @@ class ApplicationOrchestrator(QObject):
             return
 
         try:
-            # Create the new project
             new_project = self.project_manager.create_project(  # type: ignore
                 name=project_name.strip(),
                 description=project_description.strip() if project_description else ""
@@ -184,9 +186,7 @@ class ApplicationOrchestrator(QObject):
             if new_project:
                 logger.info(f"Orchestrator: Successfully created project '{new_project.name}' (ID: {new_project.id})")
 
-                # Switch to the new project
                 if self.project_manager.switch_to_project(new_project.id):  # type: ignore
-                    # Get the default session that should have been created
                     current_session = self.project_manager.get_current_session()  # type: ignore
 
                     if current_session and self.chat_manager:
@@ -239,10 +239,10 @@ class ApplicationOrchestrator(QObject):
     def _handle_message_finalized_for_session_persistence(self,
                                                           project_id: str,
                                                           session_id: str,
-                                                          request_id: str,  # noqa
-                                                          finalized_message_obj: ChatMessage,  # type: ignore # noqa
-                                                          usage_stats_dict: dict,  # noqa
-                                                          is_error: bool):  # noqa
+                                                          request_id: str,
+                                                          finalized_message_obj: ChatMessage,  # type: ignore
+                                                          usage_stats_dict: dict,
+                                                          is_error: bool):
         if not self.chat_manager:
             logger.error("Orchestrator: ChatManager not set. Cannot persist history.")
             return
@@ -288,10 +288,14 @@ class ApplicationOrchestrator(QObject):
     def get_project_manager(self) -> ProjectManager:  # type: ignore
         return self.project_manager
 
-    def get_upload_service(self) -> UploadService:  # NEW GETTER for UploadService
+    def get_upload_service(self) -> UploadService:  # type: ignore
         """Returns the initialized UploadService instance."""
-        return self.upload_service  # May return None if initialization failed
+        return self.upload_service
 
-    def get_rag_handler(self) -> RagHandler:  # NEW GETTER for RagHandler
+    def get_rag_handler(self) -> RagHandler:  # type: ignore
         """Returns the initialized RagHandler instance."""
-        return self.rag_handler  # May return None if initialization failed
+        return self.rag_handler
+
+    def get_terminal_service(self) -> TerminalService:  # NEW GETTER
+        """Returns the initialized TerminalService instance."""
+        return self.terminal_service

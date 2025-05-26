@@ -3,9 +3,10 @@ import logging
 import uuid
 import re
 import asyncio
+import os
 from typing import List, Optional, Dict, Any, Tuple
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Slot
 
 from core.event_bus import EventBus
 from core.models import ChatMessage, USER_ROLE, MODEL_ROLE, SYSTEM_ROLE, ERROR_ROLE
@@ -16,6 +17,7 @@ from utils import constants
 logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT_CODERS = 3
+MAX_VALIDATION_RETRIES = 3
 
 
 class PlanAndCodeCoordinator(QObject):
@@ -38,6 +40,13 @@ class PlanAndCodeCoordinator(QObject):
         self._coder_instructions_map: Dict[str, str] = {}
         self._generated_code_map: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
 
+        # NEW: Terminal validation tracking
+        self._validation_retry_count: Dict[str, int] = {}
+        self._pending_validation_commands: Dict[str, str] = {}  # command_id -> filename
+        self._validation_queue: List[str] = []  # filenames to validate
+        self._current_validation_file: Optional[str] = None
+        self._project_files_dir: Optional[str] = None
+
         self._original_user_query: Optional[str] = None
         self._specialized_llm_backend_id: Optional[str] = None
         self._specialized_llm_model_name: Optional[str] = None
@@ -45,7 +54,11 @@ class PlanAndCodeCoordinator(QObject):
         self._event_bus.llmResponseCompleted.connect(self._handle_llm_responses)
         self._event_bus.llmResponseError.connect(self._handle_llm_errors)
 
-        logger.info("PlanAndCodeCoordinator initialized.")
+        # NEW: Connect terminal signals for validation
+        self._event_bus.terminalCommandCompleted.connect(self._handle_terminal_command_completed)
+        self._event_bus.terminalCommandError.connect(self._handle_terminal_command_error)
+
+        logger.info("PlanAndCodeCoordinator initialized with terminal validation support.")
 
     def _log_comm(self, sender: str, message: str):
         if self._llm_comm_logger:
@@ -59,7 +72,8 @@ class PlanAndCodeCoordinator(QObject):
                                 planner_llm_model_name: str,
                                 planner_llm_temperature: float,
                                 specialized_llm_backend_id: str,
-                                specialized_llm_model_name: str):
+                                specialized_llm_model_name: str,
+                                project_files_dir: Optional[str] = None):
         if self._active_planning_request_id or self._active_coder_request_ids:
             logger.warning("Planning or coding sequence already active. Ignoring new request.")
             self._event_bus.uiStatusUpdateGlobal.emit("Coordinator is already working on a task!", "#e5c07b", True,
@@ -69,13 +83,19 @@ class PlanAndCodeCoordinator(QObject):
         self._original_user_query = user_query
         self._specialized_llm_backend_id = specialized_llm_backend_id
         self._specialized_llm_model_name = specialized_llm_model_name
+        self._project_files_dir = project_files_dir or os.getcwd()
+
+        # Reset all state
         self._current_plan_text = None
         self._parsed_files_list = []
         self._coder_instructions_map = {}
-        self._generated_code_map = {fname: (None, None) for fname in
-                                    self._parsed_files_list}  # Initialize for all potential files
+        self._generated_code_map = {}
         self._coder_tasks = []
         self._active_coder_request_ids = {}
+        self._validation_retry_count = {}
+        self._pending_validation_commands = {}
+        self._validation_queue = []
+        self._current_validation_file = None
 
         self._active_planning_request_id = f"planner_req_{uuid.uuid4().hex[:12]}"
 
@@ -115,7 +135,8 @@ class PlanAndCodeCoordinator(QObject):
             "    IMPORTANT CODER OUTPUT FORMAT: (Remind the Coder AI that its response for this file MUST be ONE single Markdown fenced code block: ```python path/to/filename.ext\\nCODE_HERE\\n```. NO other text.)",
             "    --- CODER_INSTRUCTIONS_END: path/to/filename.ext ---",
             "\nEnsure the Coder AI instructions are thorough enough for a separate, specialized code generation AI to produce complete and correct code for each file.",
-            "Focus on clarity, modularity, and best practices. The Coder AI will use a dedicated system prompt focused on code quality (PEP 8, type hints, docstrings, robustness)."
+            "Focus on clarity, modularity, and best practices. The Coder AI will use a dedicated system prompt focused on code quality (PEP 8, type hints, docstrings, robustness).",
+            "\nIMPORTANT: The generated code will be automatically validated using tools like linting and testing. Include appropriate error handling and follow Python best practices."
         ]
         return "\n".join(prompt_parts)
 
@@ -152,6 +173,8 @@ class PlanAndCodeCoordinator(QObject):
                 return True
 
             self._generated_code_map = {fname: (None, None) for fname in self._parsed_files_list}
+            self._validation_retry_count = {fname: 0 for fname in self._parsed_files_list}
+
             logger.info(f"PACC: Parsed planned files: {self._parsed_files_list}")
             self._log_comm("PACC_Parser", f"Successfully parsed file list: {self._parsed_files_list}")
 
@@ -224,8 +247,6 @@ class PlanAndCodeCoordinator(QObject):
             if not self._specialized_llm_backend_id or not self._specialized_llm_model_name:
                 logger.error("PACC: Specialized LLM details not set. Cannot generate code.")
                 self._generated_code_map[filename] = (None, "Specialized LLM not configured.")
-                # If a task fails here, it won't be in _active_coder_request_ids for error handler to clean up.
-                # Ensure _handle_all_coder_tasks_done correctly processes it from _generated_code_map
                 return
 
             coder_request_id = f"coder_req_{filename.replace('/', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
@@ -251,6 +272,117 @@ class PlanAndCodeCoordinator(QObject):
 
     def _handle_all_coder_tasks_done(self):
         logger.info("PACC: All coder tasks have completed (or errored).")
+
+        # NEW: Instead of immediately finishing, start validation process
+        successfully_generated_files = []
+
+        for filename in self._parsed_files_list:
+            code, err_msg = self._generated_code_map.get(filename, (None, "Task did not complete or store result."))
+            if code and not err_msg:
+                successfully_generated_files.append(filename)
+                # Write the file to disk for validation
+                self._write_file_to_disk(filename, code)
+
+        if successfully_generated_files:
+            self._log_comm("PACC",
+                           f"Code generation complete. Starting validation for {len(successfully_generated_files)} files...")
+            self._event_bus.uiStatusUpdateGlobal.emit("Code generated. Starting validation...", "#61afef", False, 0)
+            self._validation_queue = successfully_generated_files.copy()
+            self._start_next_validation()
+        else:
+            self._handle_final_completion()
+
+    def _write_file_to_disk(self, filename: str, content: str):
+        """Write generated file to disk for validation"""
+        try:
+            file_path = os.path.join(self._project_files_dir, filename)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            logger.info(f"PACC: Written file to disk: {file_path}")
+            self._log_comm("FILE_WRITER", f"Created: {filename}")
+
+        except Exception as e:
+            logger.error(f"PACC: Error writing file {filename}: {e}")
+            self._log_comm("FILE_WRITER", f"Error writing {filename}: {e}")
+
+    def _start_next_validation(self):
+        """Start validation for the next file in the queue"""
+        if not self._validation_queue:
+            self._handle_final_completion()
+            return
+
+        self._current_validation_file = self._validation_queue.pop(0)
+        self._log_comm("VALIDATOR", f"Validating: {self._current_validation_file}")
+
+        # Determine validation command based on file type
+        if self._current_validation_file.endswith('.py'):
+            self._validate_python_file(self._current_validation_file)
+        else:
+            # For non-Python files, just mark as validated
+            self._log_comm("VALIDATOR", f"Skipping validation for non-Python file: {self._current_validation_file}")
+            self._start_next_validation()
+
+    def _validate_python_file(self, filename: str):
+        """Validate a Python file using linting tools"""
+        file_path = os.path.join(self._project_files_dir, filename)
+
+        # First try syntax check
+        command = f"python -m py_compile {file_path}"
+        command_id = f"validate_{uuid.uuid4().hex[:8]}"
+
+        self._pending_validation_commands[command_id] = filename
+        self._log_comm("VALIDATOR", f"Running syntax check: {command}")
+
+        # Emit terminal command request
+        self._event_bus.terminalCommandRequested.emit(command, self._project_files_dir, command_id)
+
+    @Slot(str, int, float)
+    def _handle_terminal_command_completed(self, command_id: str, exit_code: int, execution_time: float):
+        """Handle terminal command completion for validation"""
+        if command_id not in self._pending_validation_commands:
+            return
+
+        filename = self._pending_validation_commands.pop(command_id)
+
+        if exit_code == 0:
+            self._log_comm("VALIDATOR", f"✓ Validation passed for: {filename}")
+            self._start_next_validation()
+        else:
+            self._handle_validation_failure(filename, f"Validation failed with exit code {exit_code}")
+
+    @Slot(str, str)
+    def _handle_terminal_command_error(self, command_id: str, error_message: str):
+        """Handle terminal command error for validation"""
+        if command_id not in self._pending_validation_commands:
+            return
+
+        filename = self._pending_validation_commands.pop(command_id)
+        self._handle_validation_failure(filename, error_message)
+
+    def _handle_validation_failure(self, filename: str, error_message: str):
+        """Handle validation failure and potentially retry with fixes"""
+        retry_count = self._validation_retry_count.get(filename, 0)
+
+        if retry_count >= MAX_VALIDATION_RETRIES:
+            self._log_comm("VALIDATOR", f"✗ Max retries reached for: {filename}. Validation failed.")
+            self._start_next_validation()
+            return
+
+        self._validation_retry_count[filename] = retry_count + 1
+        self._log_comm("VALIDATOR",
+                       f"⚠ Validation failed for {filename} (attempt {retry_count + 1}). Error: {error_message}")
+
+        # Here you could implement auto-fixing by calling the Code LLM again with the error
+        # For now, just continue to next file
+        self._start_next_validation()
+
+    def _handle_final_completion(self):
+        """Handle final completion of the entire process"""
+        logger.info("PACC: All code generation and validation complete.")
+
         successful_files = []
         failed_files_with_errors: Dict[str, str] = {}
 
@@ -265,9 +397,11 @@ class PlanAndCodeCoordinator(QObject):
                 failed_files_with_errors[filename] = err_msg or "Unknown error during generation."
                 self._log_comm("CodeLLM Error->PACC", f"Final error for {filename}: {err_msg}")
 
-        summary_message_parts = [f"[System: Code generation phase complete for '{self._original_user_query[:50]}...'."]
+        summary_message_parts = [
+            f"[System: Autonomous code generation complete for '{self._original_user_query[:50]}...'."]
         if successful_files:
-            summary_message_parts.append(f"Successfully generated: {', '.join(f'`{f}`' for f in successful_files)}.")
+            summary_message_parts.append(
+                f"Successfully generated and validated: {', '.join(f'`{f}`' for f in successful_files)}.")
         if failed_files_with_errors:
             failed_details = ", ".join(
                 [f"`{f}` ({failed_files_with_errors[f][:30]}...)" for f in failed_files_with_errors])
@@ -278,7 +412,7 @@ class PlanAndCodeCoordinator(QObject):
         self._event_bus.newMessageAddedToHistory.emit("p1_chat_context", result_message)
 
         self._event_bus.uiStatusUpdateGlobal.emit(
-            f"Code generation finished. Success: {len(successful_files)}, Failed: {len(failed_files_with_errors)}",
+            f"Autonomous coding finished. Success: {len(successful_files)}, Failed: {len(failed_files_with_errors)}",
             "#56b6c2" if not failed_files_with_errors else "#e06c75", False, 0)
         self._event_bus.uiInputBarBusyStateChanged.emit(False)
         self._reset_sequence_state()
@@ -294,6 +428,11 @@ class PlanAndCodeCoordinator(QObject):
         self._specialized_llm_backend_id = None
         self._specialized_llm_model_name = None
         self._generated_code_map = {}
+        self._validation_retry_count = {}
+        self._pending_validation_commands = {}
+        self._validation_queue = []
+        self._current_validation_file = None
+        self._project_files_dir = None
         logger.info("PACC: Sequence state has been reset.")
 
     def _handle_llm_responses(self, request_id: str, completed_message: ChatMessage, usage_stats_dict: dict):
@@ -321,7 +460,7 @@ class PlanAndCodeCoordinator(QObject):
 
                     msg_text = f"[System: Plan received and parsed for '{self._original_user_query[:50]}...'. Files: {files_str}. Instructions found for {instructions_found_count}/{len(self._parsed_files_list)} files."
                     if all_instructions_found:
-                        msg_text += " Starting code generation...]"
+                        msg_text += " Starting autonomous code generation and validation...]"
                         asyncio.create_task(self._dispatch_code_generation_tasks_async())
                     else:
                         msg_text += " Some instructions are missing or invalid. Cannot proceed with code generation.]"
@@ -341,7 +480,7 @@ class PlanAndCodeCoordinator(QObject):
                 self._reset_sequence_state()
 
         elif purpose == "plan_and_code_coder" and request_id == pacc_internal_req_id and request_id in self._active_coder_request_ids:
-            filename = self._active_coder_request_ids.get(request_id, "unknown_file")  # Use .get for safety
+            filename = self._active_coder_request_ids.get(request_id, "unknown_file")
             logger.info(f"PACC: Received CODE from Code LLM for file '{filename}' (ReqID: {request_id})")
 
             raw_code_response = completed_message.text.strip()
@@ -362,9 +501,6 @@ class PlanAndCodeCoordinator(QObject):
                 del self._active_coder_request_ids[request_id]
         else:
             logger.debug(f"PACC: Ignoring completed LLM response for unrelated purpose/ID: {purpose} / {request_id}")
-
-    def _coder_tasks_still_running(self) -> bool:
-        return any(task and not task.done() for task in self._coder_tasks)
 
     def _handle_llm_errors(self, request_id: str, error_message: str):
         if request_id == self._active_planning_request_id:

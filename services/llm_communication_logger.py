@@ -1,10 +1,11 @@
+# services/llm_communication_logger.py
 import html
 import logging
 import re
 from datetime import datetime
 from typing import Optional, Set, Dict, Any
 
-from PySide6.QtCore import QObject, Signal # CORRECTED IMPORT
+from PySide6.QtCore import QObject, Signal, Slot
 
 # --- Pygments Imports for Syntax Highlighting ---
 try:
@@ -17,15 +18,26 @@ try:
     PYGMENTS_AVAILABLE = True
 except ImportError:
     PYGMENTS_AVAILABLE = False
-    highlight = None; get_lexer_by_name = None; guess_lexer = None; PythonLexer = None # type: ignore
-    HtmlFormatter = None; get_style_by_name = None; PygmentsClassNotFound = type("PygmentsClassNotFound", (Exception,), {}) # type: ignore
+    highlight = None;
+    get_lexer_by_name = None;
+    guess_lexer = None;
+    PythonLexer = None  # type: ignore
+    HtmlFormatter = None;
+    get_style_by_name = None;
+    PygmentsClassNotFound = type("PygmentsClassNotFound", (Exception,), {})  # type: ignore
     logging.getLogger(__name__).warning(
         "LlmCommunicationLogger: 'Pygments' library not found. Code block syntax highlighting will be basic."
     )
 
+try:
+    from core.event_bus import EventBus
+except ImportError:
+    EventBus = None
+    logging.getLogger(__name__).warning("LlmCommunicationLogger: EventBus not available")
+
 logger = logging.getLogger(__name__)
 
-STYLED_CONTENT_SENDERS = {"PLANNER AI", "CODE LLM", "GEMINI", "OLLAMA", "GPT", "USER"}
+STYLED_CONTENT_SENDERS = {"PLANNER AI", "CODE LLM", "GEMINI", "OLLAMA", "GPT", "USER", "TERMINAL"}
 META_PREFIX_KEYWORDS: Set[str] = {
     "[MC SYSTEM]", "[SYSTEM PROCESS]", "[SYSTEM INFO]", "[SYSTEM]",
     "[RAG QUERY]", "[PROCESS]", "[INFO]", "[DEBUG]",
@@ -33,21 +45,29 @@ META_PREFIX_KEYWORDS: Set[str] = {
     "EXTRACTED CODER INSTRUCTIONS FOR:", "PLANNED FILES:", "RECEIVED PLAN. LENGTH:",
     "PARSING...", "SENDING REQUEST TO", "GENERATING CODE FOR"
 }
+
 HTML_SENDER_STYLES: Dict[str, Dict[str, Any]] = {
-    "ERROR":        {"prefix_color": "#FF6B6B", "symbol": "❌ ", "is_bold": True},
-    "WARN":         {"prefix_color": "#FFA94D", "symbol": "⚠️ ", "is_bold": True},
-    "PLANNER AI":   {"prefix_color": "#4DFFFF", "content_color": "#B0E0E6", "symbol": "🧠 ", "is_bold": False},
-    "GEMINI":       {"prefix_color": "#87CEFA", "content_color": "#ADD8E6", "symbol": "✨ ", "is_bold": False},
-    "CODE LLM":     {"prefix_color": "#73F073", "content_color": "#90EE90", "symbol": "💻 ", "is_bold": False},
-    "OLLAMA":       {"prefix_color": "#FFB6C1", "content_color": "#FFC0CB", "symbol": "🦙 ", "is_bold": False},
-    "GPT":          {"prefix_color": "#9370DB", "content_color": "#B19CD9", "symbol": "💡 ", "is_bold": False},
-    "SYSTEM":       {"prefix_color": "#FFFACD", "symbol": "⚙️ ", "is_bold": True},
-    "USER":         {"prefix_color": "#98FB98", "content_color": "#98FB98", "symbol": "> ", "is_bold": True},
-    "RAG":          {"prefix_color": "#FFC0CB", "symbol": "📚 ", "is_bold": True},
-    "PROCESS":      {"prefix_color": "#ADD8E6", "symbol": "🛠️ ", "is_bold": True},
-    "INFO":         {"prefix_color": "#D3D3D3", "symbol": "ℹ️ ", "is_bold": False},
-    "DEBUG":        {"prefix_color": "#A9A9A9", "symbol": "🐞 ", "is_bold": False},
+    "ERROR": {"prefix_color": "#FF6B6B", "symbol": "❌ ", "is_bold": True},
+    "WARN": {"prefix_color": "#FFA94D", "symbol": "⚠️ ", "is_bold": True},
+    "PLANNER AI": {"prefix_color": "#4DFFFF", "content_color": "#B0E0E6", "symbol": "🧠 ", "is_bold": False},
+    "GEMINI": {"prefix_color": "#87CEFA", "content_color": "#ADD8E6", "symbol": "✨ ", "is_bold": False},
+    "CODE LLM": {"prefix_color": "#73F073", "content_color": "#90EE90", "symbol": "💻 ", "is_bold": False},
+    "OLLAMA": {"prefix_color": "#FFB6C1", "content_color": "#FFC0CB", "symbol": "🦙 ", "is_bold": False},
+    "GPT": {"prefix_color": "#9370DB", "content_color": "#B19CD9", "symbol": "💡 ", "is_bold": False},
+    "SYSTEM": {"prefix_color": "#FFFACD", "symbol": "⚙️ ", "is_bold": True},
+    "USER": {"prefix_color": "#98FB98", "content_color": "#98FB98", "symbol": "> ", "is_bold": True},
+    "RAG": {"prefix_color": "#FFC0CB", "symbol": "📚 ", "is_bold": True},
+    "PROCESS": {"prefix_color": "#ADD8E6", "symbol": "🛠️ ", "is_bold": True},
+    "INFO": {"prefix_color": "#D3D3D3", "symbol": "ℹ️ ", "is_bold": False},
+    "DEBUG": {"prefix_color": "#A9A9A9", "symbol": "🐞 ", "is_bold": False},
+    # NEW: Terminal-related styles
+    "TERMINAL": {"prefix_color": "#00FF41", "content_color": "#00FF41", "symbol": "$ ", "is_bold": True},
+    "TERMINAL_OUT": {"prefix_color": "#CCCCCC", "content_color": "#CCCCCC", "symbol": "  ", "is_bold": False},
+    "TERMINAL_ERR": {"prefix_color": "#FF4444", "content_color": "#FF4444", "symbol": "⚠ ", "is_bold": False},
+    "TERMINAL_OK": {"prefix_color": "#44FF44", "content_color": "#44FF44", "symbol": "✓ ", "is_bold": True},
+    "TERMINAL_FAIL": {"prefix_color": "#FF4444", "content_color": "#FF4444", "symbol": "✗ ", "is_bold": True},
 }
+
 HTML_DEFAULT_SENDER_STYLE: Dict[str, Any] = {"prefix_color": "#E0E0E0", "symbol": "💬 ", "is_bold": False}
 HTML_TIMESTAMP_COLOR = "#686868"
 HTML_DEFAULT_MESSAGE_COLOR = "#DCDCDC"
@@ -55,6 +75,7 @@ HTML_META_MESSAGE_COLOR = "#888C8F"
 HTML_META_FONT_SIZE = "0.9em"
 PYGMENTS_STYLE_NAME = 'material'
 CODE_BLOCK_REGEX = re.compile(r"```(?:([a-zA-Z0-9_\-.+#\s]*)\n)?(.*?)```", re.DOTALL)
+
 
 class LlmCommunicationLogger(QObject):
     new_terminal_log_entry = Signal(str)
@@ -83,7 +104,48 @@ class LlmCommunicationLogger(QObject):
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
+        self._event_bus = EventBus.get_instance() if EventBus else None
+        self._connect_terminal_signals()
         logger.info("LlmCommunicationLogger initialized.")
+
+    def _connect_terminal_signals(self):
+        """Connect to terminal-related EventBus signals"""
+        if not self._event_bus:
+            return
+
+        self._event_bus.terminalCommandStarted.connect(self._handle_terminal_command_started)
+        self._event_bus.terminalCommandOutput.connect(self._handle_terminal_output)
+        self._event_bus.terminalCommandCompleted.connect(self._handle_terminal_completed)
+        self._event_bus.terminalCommandError.connect(self._handle_terminal_error)
+
+    @Slot(str, str)
+    def _handle_terminal_command_started(self, command_id: str, command: str):
+        """Handle terminal command start"""
+        self.log_message("TERMINAL", f"{command}")
+
+    @Slot(str, str, str)
+    def _handle_terminal_output(self, command_id: str, output_type: str, content: str):
+        """Handle terminal command output (stdout/stderr)"""
+        if not content.strip():
+            return
+
+        if output_type == "stdout":
+            self.log_message("TERMINAL_OUT", content)
+        elif output_type == "stderr":
+            self.log_message("TERMINAL_ERR", content)
+
+    @Slot(str, int, float)
+    def _handle_terminal_completed(self, command_id: str, exit_code: int, execution_time: float):
+        """Handle terminal command completion"""
+        if exit_code == 0:
+            self.log_message("TERMINAL_OK", f"Command completed successfully ({execution_time:.2f}s)")
+        else:
+            self.log_message("TERMINAL_FAIL", f"Command failed with exit code {exit_code} ({execution_time:.2f}s)")
+
+    @Slot(str, str)
+    def _handle_terminal_error(self, command_id: str, error_message: str):
+        """Handle terminal command error"""
+        self.log_message("TERMINAL_FAIL", f"Command error: {error_message}")
 
     def _is_meta_message(self, sender_prefix_str: str, message_str: str) -> bool:
         prefix_upper = sender_prefix_str.upper()
@@ -93,7 +155,8 @@ class LlmCommunicationLogger(QObject):
                 return True
         if "PLANNER AI" in prefix_upper or "GEMINI" in prefix_upper:
             if any(status_phrase in message_upper for status_phrase in
-                   ["EXTRACTED CODER INSTRUCTIONS FOR:", "PLANNED FILES:", "RECEIVED PLAN. LENGTH:", "PARSING...", "SENDING REQUEST TO", "GENERATING CODE FOR"]):
+                   ["EXTRACTED CODER INSTRUCTIONS FOR:", "PLANNED FILES:", "RECEIVED PLAN. LENGTH:", "PARSING...",
+                    "SENDING REQUEST TO", "GENERATING CODE FOR"]):
                 return True
         return False
 
@@ -108,8 +171,10 @@ class LlmCommunicationLogger(QObject):
             if language_hint:
                 try:
                     hint_lower = language_hint.strip().lower()
-                    if hint_lower in ["python", "py"]: lexer = PythonLexer()
-                    elif hint_lower: lexer = get_lexer_by_name(hint_lower)
+                    if hint_lower in ["python", "py"]:
+                        lexer = PythonLexer()
+                    elif hint_lower:
+                        lexer = get_lexer_by_name(hint_lower)
                 except PygmentsClassNotFound:
                     logger.debug(f"Pygments lexer not found for hint: '{language_hint}'. Will try guessing.")
             if not lexer:
@@ -143,7 +208,7 @@ class LlmCommunicationLogger(QObject):
         html_timestamp_str = timestamp_dt.strftime("%H:%M:%S.%f")[:-3]
         is_meta = self._is_meta_message(sender_prefix, message)
         chosen_style = HTML_DEFAULT_SENDER_STYLE
-        prefix_upper_no_brackets = sender_prefix.upper().replace('[','').replace(']','')
+        prefix_upper_no_brackets = sender_prefix.upper().replace('[', '').replace(']', '')
         for keyword, style_dict_val in HTML_SENDER_STYLES.items():
             if keyword in prefix_upper_no_brackets:
                 chosen_style = style_dict_val
@@ -156,7 +221,7 @@ class LlmCommunicationLogger(QObject):
         message_content_color = HTML_DEFAULT_MESSAGE_COLOR
         if is_meta:
             message_content_color = HTML_META_MESSAGE_COLOR
-        elif sender_prefix.upper().replace('[','').replace(']','') in STYLED_CONTENT_SENDERS:
+        elif sender_prefix.upper().replace('[', '').replace(']', '') in STYLED_CONTENT_SENDERS:
             message_content_color = chosen_style.get("content_color", HTML_DEFAULT_MESSAGE_COLOR)
         formatted_message_parts = []
         last_end_pos = 0
@@ -190,71 +255,3 @@ class LlmCommunicationLogger(QObject):
             f'</div>'
         )
         self.new_terminal_log_entry.emit(html_entry)
-
-if __name__ == '__main__':
-    from PySide6.QtWidgets import QApplication, QTextEdit, QVBoxLayout, QWidget, QPushButton
-    from PySide6.QtCore import Qt, QTimer
-    import sys
-    import time
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar)
-    app = QApplication(sys.argv)
-    test_window = QWidget()
-    test_window.setWindowTitle("LLM Log GUI Test")
-    layout = QVBoxLayout(test_window)
-    log_display_gui = QTextEdit()
-    log_display_gui.setReadOnly(True)
-    log_display_gui.setStyleSheet(
-        "background-color: #1A1A1A; color: #E0E0E0; "
-        "font-family: 'Menlo', 'Consolas', 'Courier New', monospace; font-size: 10pt; "
-        "border: 1px solid #333333; padding: 8px;"
-    )
-    button = QPushButton("Send Test Logs")
-    layout.addWidget(log_display_gui)
-    layout.addWidget(button)
-    test_window.resize(900, 700)
-    test_window.show()
-    logger_instance = LlmCommunicationLogger()
-    logger_instance.new_terminal_log_entry.connect(log_display_gui.appendHtml)
-    def send_sample_logs():
-        log_display_gui.appendHtml(
-            "<div style='color:#888; text-align:center; margin: 10px 0; font-style:italic;'>--- Sending Sample Logs ---</div>"
-        )
-        logger_instance.log_message("[USER]", "Generate a Flask app for a simple to-do list.")
-        time.sleep(0.05)
-        logger_instance.log_message("[SYSTEM PROCESS]", "MC: Bootstrap sequence initiated.")
-        time.sleep(0.05)
-        logger_instance.log_message("[GEMINI]", "Okay, I'll plan that Flask app for you! Starting with `app.py`...")
-        time.sleep(0.05)
-        python_code_sample = """from flask import Flask
-
-app = Flask(__name__)
-
-@app.route('/')
-def hello():
-    # This is a comment
-    return "Hello, AvA!"
-
-if __name__ == '__main__':
-    app.run(debug=True)"""
-        logger_instance.log_message("[OLLAMA]", f"Here's the code for `app.py`:\n```python\n{python_code_sample}\n```\nDoes this look good?")
-        time.sleep(0.05)
-        logger_instance.log_message("[USER]", "Yes, that's a great start! Now add a route for `/todos` that returns a JSON list.")
-        time.sleep(0.05)
-        logger_instance.log_message("[SYSTEM INFO]", "Refinement request received by planner.")
-        time.sleep(0.05)
-        logger_instance.log_message("[ERROR - GEMINI]", "Rate limit exceeded. Please try again later.")
-        time.sleep(0.05)
-        logger_instance.log_message("[WARN - SYSTEM]", "The previous AI response might be incomplete due to an error.")
-        time.sleep(0.05)
-        logger_instance.log_message("[DEBUG]", "Current context window size: 4096 tokens.")
-        time.sleep(0.05)
-        logger_instance.log_message("[INFO]", "System check complete.\nAll services appear to be operational.\nNext check in 5 minutes.")
-        time.sleep(0.05)
-        logger_instance.log_message("[CODE LLM]", "```json\n{\n  \"status\": \"success\",\n  \"file_count\": 1\n}\n```")
-        log_display_gui.appendHtml(
-            "<div style='color:#888; text-align:center; margin: 10px 0; font-style:italic;'>--- Sample Logs Sent ---</div>"
-        )
-    button.clicked.connect(send_sample_logs)
-    QTimer.singleShot(200, send_sample_logs)
-    sys.exit(app.exec())

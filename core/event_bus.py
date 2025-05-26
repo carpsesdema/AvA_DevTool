@@ -49,6 +49,13 @@ class EventBus(QObject):
     messageFinalizedForSession = Signal(str, str, str, object, dict,
                                         bool)  # project_id, session_id, request_id, message_obj, usage_dict, is_error
 
+    # NEW: Terminal Command Execution
+    terminalCommandRequested = Signal(str, str, str)  # command, working_directory, command_id
+    terminalCommandStarted = Signal(str, str)  # command_id, command
+    terminalCommandOutput = Signal(str, str, str)  # command_id, output_type, content (output_type: "stdout", "stderr")
+    terminalCommandCompleted = Signal(str, int, float)  # command_id, exit_code, execution_time
+    terminalCommandError = Signal(str, str)  # command_id, error_message
+
     # Global UI Updates
     uiStatusUpdateGlobal = Signal(str, str, bool, int) # message, color_hex, is_temporary, duration_ms
     uiErrorGlobal = Signal(str, bool) # error_message, is_critical
@@ -78,4 +85,3 @@ class EventBus(QObject):
             pass # Already the primary instance
 
         logger.debug(f"EventBus instance {id(self)} signals defined.")
-
