@@ -1,4 +1,4 @@
-# core/application_orchestrator.py - Fixed code viewer integration
+# core/application_orchestrator.py
 import logging
 from typing import Dict, Optional, Any, List, TYPE_CHECKING
 
@@ -14,24 +14,23 @@ try:
     from services.llm_communication_logger import LlmCommunicationLogger
     from services.upload_service import UploadService
     from services.terminal_service import TerminalService
-    from services.update_service import UpdateService  # NEW: Add UpdateService import
+    from services.update_service import UpdateService
     from core.rag_handler import RagHandler
     from utils import constants
     from services.project_service import ProjectManager, Project, ChatSession
     from core.models import ChatMessage
     from ui.dialogs.code_viewer_dialog import CodeViewerWindow
 except ImportError as e:
-    ProjectManager = type("ProjectManager", (object,), {})  # type: ignore
-    ChatMessage = type("ChatMessage", (object,), {})  # type: ignore
-    UploadService = type("UploadService", (object,), {})  # type: ignore
-    RagHandler = type("RagHandler", (object,), {})  # type: ignore
-    TerminalService = type("TerminalService", (object,), {})  # type: ignore
-    UpdateService = type("UpdateService", (object,), {})  # type: ignore
-    CodeViewerWindow = type("CodeViewerWindow", (object,), {})  # type: ignore
+    ProjectManager = type("ProjectManager", (object,), {})
+    ChatMessage = type("ChatMessage", (object,), {})
+    UploadService = type("UploadService", (object,), {})
+    RagHandler = type("RagHandler", (object,), {})
+    TerminalService = type("TerminalService", (object,), {})
+    UpdateService = type("UpdateService", (object,), {})
+    CodeViewerWindow = type("CodeViewerWindow", (object,), {})
     logging.getLogger(__name__).critical(f"Critical import error in ApplicationOrchestrator: {e}", exc_info=True)
     raise
 
-# Conditional import to break circular dependency for type hinting
 if TYPE_CHECKING:
     from core.chat_manager import ChatManager
 
@@ -40,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 class ApplicationOrchestrator(QObject):
     def __init__(self,
-                 project_manager: ProjectManager,  # type: ignore
+                 project_manager: ProjectManager,
                  parent: Optional[QObject] = None):
         super().__init__(parent)
         logger.info("ApplicationOrchestrator initializing...")
@@ -50,14 +49,13 @@ class ApplicationOrchestrator(QObject):
             logger.critical("EventBus instance is None in ApplicationOrchestrator.")
             raise RuntimeError("EventBus could not be instantiated.")
 
-        self.project_manager: ProjectManager = project_manager  # type: ignore
-        if not isinstance(self.project_manager, ProjectManager):  # type: ignore
+        self.project_manager: ProjectManager = project_manager
+        if not isinstance(self.project_manager, ProjectManager):
             logger.critical("ApplicationOrchestrator requires a valid ProjectManager.")
             raise TypeError("ApplicationOrchestrator requires a valid ProjectManager.")
 
-        self.chat_manager: Optional = None  # Removed type hint to avoid circular import
+        self.chat_manager: Optional['ChatManager'] = None
 
-        # --- LLM Backend Adapters ---
         self.gemini_chat_adapter = GeminiAdapter()
         self.ollama_chat_adapter = OllamaAdapter()
         self.gpt_chat_adapter = GPTAdapter()
@@ -69,14 +67,27 @@ class ApplicationOrchestrator(QObject):
             "gpt_chat_default": self.gpt_chat_adapter,
             constants.GENERATOR_BACKEND_ID: self.ollama_generator_adapter
         }
+
         if constants.DEFAULT_CHAT_BACKEND_ID not in self._all_backend_adapters_dict:
-            logger.warning(
-                f"DEFAULT_CHAT_BACKEND_ID '{constants.DEFAULT_CHAT_BACKEND_ID}' not found in adapter map. Falling back to 'gemini_chat_default'.")
-            self._all_backend_adapters_dict[constants.DEFAULT_CHAT_BACKEND_ID] = self.gemini_chat_adapter
+            logger.critical(
+                f"CRITICAL: constants.DEFAULT_CHAT_BACKEND_ID ('{constants.DEFAULT_CHAT_BACKEND_ID}') "
+                f"is not a defined key in _all_backend_adapters_dict. This will cause issues. "
+                f"Valid keys are: {list(self._all_backend_adapters_dict.keys())}. "
+                f"Please ensure constants.DEFAULT_CHAT_BACKEND_ID matches one of these (e.g., 'gemini_chat_default')."
+            )
+            # This fallback might not be ideal if the constant is a model name,
+            # but it's an attempt to prevent outright crash if constants.py isn't aligned.
+            if "gemini_chat_default" in self._all_backend_adapters_dict:
+                # Create an alias if the DEFAULT_CHAT_BACKEND_ID was intended as a specific model string for gemini_chat_default
+                self._all_backend_adapters_dict[constants.DEFAULT_CHAT_BACKEND_ID] = self.gemini_chat_adapter
+                logger.warning(
+                    f"Fall-back: Pointing specific ID '{constants.DEFAULT_CHAT_BACKEND_ID}' to gemini_chat_adapter instance. Review constants.py for alignment.")
 
         if constants.GENERATOR_BACKEND_ID not in self._all_backend_adapters_dict:
             logger.warning(
-                f"GENERATOR_BACKEND_ID '{constants.GENERATOR_BACKEND_ID}' not found in adapter map. Attempting to add default Ollama Generator.")
+                f"GENERATOR_BACKEND_ID '{constants.GENERATOR_BACKEND_ID}' not found in adapter map. "
+                f"Re-adding default Ollama Generator."
+            )  # This should normally be "ollama_generator_default"
             self._all_backend_adapters_dict[constants.GENERATOR_BACKEND_ID] = self.ollama_generator_adapter
 
         try:
@@ -88,10 +99,8 @@ class ApplicationOrchestrator(QObject):
             logger.critical(f"An unexpected error occurred instantiating BackendCoordinator: {e_bc}", exc_info=True)
             raise
 
-        # --- RAG Services ---
-        self.upload_service = None
-        self.rag_handler = None
-
+        self.upload_service: Optional[UploadService] = None
+        self.rag_handler: Optional[RagHandler] = None
         try:
             self.upload_service = UploadService()
             vector_db_service = getattr(self.upload_service, '_vector_db_service',
@@ -99,34 +108,33 @@ class ApplicationOrchestrator(QObject):
             self.rag_handler = RagHandler(self.upload_service, vector_db_service)
             logger.info("RAG services initialized successfully")
         except Exception as e_rag:
-            logger.error(f"Failed to initialize RAG services: {e_rag}. RAG functionality will be disabled.")
+            logger.error(f"Failed to initialize RAG services: {e_rag}. RAG functionality will be disabled.",
+                         exc_info=True)
             self.upload_service = None
             self.rag_handler = None
 
-        # --- Terminal Service ---
-        self.terminal_service = None
+        self.terminal_service: Optional[TerminalService] = None
         try:
             self.terminal_service = TerminalService(parent=self)
             logger.info("TerminalService initialized successfully")
         except Exception as e_terminal:
             logger.error(
-                f"Failed to initialize TerminalService: {e_terminal}. Terminal functionality will be disabled.")
+                f"Failed to initialize TerminalService: {e_terminal}. Terminal functionality will be disabled.",
+                exc_info=True)
             self.terminal_service = None
 
-        # --- Update Service ---
-        self.update_service = None
+        self.update_service: Optional[UpdateService] = None
         try:
             self.update_service = UpdateService(parent=self)
             logger.info("UpdateService initialized successfully")
         except Exception as e_update:
-            logger.error(f"Failed to initialize UpdateService: {e_update}. Update functionality will be disabled.")
+            logger.error(f"Failed to initialize UpdateService: {e_update}. Update functionality will be disabled.",
+                         exc_info=True)
             self.update_service = None
 
-        # --- Code Viewer Dialog ---
-        # IMPORTANT: Don't create the code viewer here, let the dialog service manage it
-        self.code_viewer_window = None
+        # CodeViewerWindow instance is managed by DialogService, not directly by Orchestrator
+        # self.code_viewer_window: Optional[CodeViewerWindow] = None
 
-        # --- LLM Communication Logger ---
         self.llm_communication_logger: Optional[LlmCommunicationLogger] = None
         try:
             self.llm_communication_logger = LlmCommunicationLogger(parent=self)
@@ -136,8 +144,7 @@ class ApplicationOrchestrator(QObject):
         self._connect_event_bus()
         logger.info("ApplicationOrchestrator initialization complete.")
 
-    def set_chat_manager(self, chat_manager):  # Removed type hint to avoid circular import
-        """Allows ChatManager instance to be set after mutual creation."""
+    def set_chat_manager(self, chat_manager: 'ChatManager'):
         self.chat_manager = chat_manager
 
     def _connect_event_bus(self):
@@ -145,16 +152,15 @@ class ApplicationOrchestrator(QObject):
         self.event_bus.createNewProjectRequested.connect(self._handle_create_new_project_requested)
         self.event_bus.messageFinalizedForSession.connect(self._handle_message_finalized_for_session_persistence)
 
-        # Connect code viewer related signals - FIXED: These should auto-create code viewer when needed
-        self.event_bus.viewCodeViewerRequested.connect(self._handle_view_code_viewer_requested)
-        self.event_bus.modificationFileReadyForDisplay.connect(self._handle_modification_file_ready_for_display)
+        # Orchestrator only EMITS modificationFileReadyForDisplay.
+        # It does NOT directly handle showing the code viewer. MainWindow does.
+        self.event_bus.modificationFileReadyForDisplay.connect(self._log_file_ready_for_display)  # Log and pass through
+
         self.event_bus.applyFileChangeRequested.connect(self._handle_apply_file_change_requested)
 
-        # Connect update service if available
+        # Connect update service signals if service is available
         if self.update_service:
             self.event_bus.checkForUpdatesRequested.connect(self.update_service.check_for_updates)
-
-            # Connect update service signals to event bus
             self.update_service.update_available.connect(self.event_bus.updateAvailable.emit)
             self.update_service.no_update_available.connect(self.event_bus.noUpdateAvailable.emit)
             self.update_service.update_check_failed.connect(self.event_bus.updateCheckFailed.emit)
@@ -162,20 +168,17 @@ class ApplicationOrchestrator(QObject):
             self.update_service.update_download_failed.connect(self.event_bus.updateDownloadFailed.emit)
             self.update_service.update_progress.connect(self.event_bus.updateProgress.emit)
             self.update_service.update_status.connect(self.event_bus.updateStatusChanged.emit)
-
-            # Connect download and install requests
             self.event_bus.updateDownloadRequested.connect(self.update_service.download_update)
             self.event_bus.updateInstallRequested.connect(self._handle_update_install)
             self.event_bus.applicationRestartRequested.connect(self.update_service.restart_application)
 
         if hasattr(self.project_manager, 'projectDeleted'):
-            self.project_manager.projectDeleted.connect(self._handle_project_deleted)  # type: ignore
+            self.project_manager.projectDeleted.connect(self._handle_project_deleted)
         else:
             logger.warning("ProjectManager does not have projectDeleted signal. Cannot connect in Orchestrator.")
 
     @Slot(str)
     def _handle_update_install(self, file_path: str):
-        """Handle update installation request"""
         if self.update_service:
             success = self.update_service.apply_update(file_path)
             if success:
@@ -185,133 +188,76 @@ class ApplicationOrchestrator(QObject):
                 logger.error("Failed to apply update")
                 self.event_bus.uiErrorGlobal.emit("Failed to install update", False)
 
-    @Slot()
-    def _handle_view_code_viewer_requested(self):
-        """Handle request to show the code viewer window"""
-        # FIXED: Don't pre-create code viewer, let dialog service handle it
-        logger.info("ApplicationOrchestrator: Code viewer view requested - delegating to dialog service")
-        # The dialog service should handle this request and create/show the code viewer
+    @Slot(str, str)  # Renamed: Just logs, doesn't directly show viewer
+    def _log_file_ready_for_display(self, filename: str, content: str):
+        """Logs that a file is ready. MainWindow will handle showing it."""
+        logger.info(
+            f"Orchestrator: Emitted modificationFileReadyForDisplay for '{filename}' ({len(content)} chars). MainWindow should handle UI.")
+        # The actual display is handled by MainWindow listening to this signal.
 
-    def _ensure_code_viewer_created(self):
-        """Ensure code viewer is created and connected properly"""
-        if not self.code_viewer_window:
-            try:
-                self.code_viewer_window = CodeViewerWindow(parent=None)  # No parent so it can be independent
-                logger.info("ApplicationOrchestrator: CodeViewerWindow created successfully")
+    # This method is removed as Orchestrator should not directly manage UI dialogs.
+    # def _ensure_code_viewer_created(self) -> Optional[CodeViewerWindow]:
+    #     pass
 
-                # Connect the code viewer's apply signal to event bus
-                if hasattr(self.code_viewer_window, 'apply_change_requested'):
-                    self.code_viewer_window.apply_change_requested.connect(
-                        lambda project_id, filepath, content, focus_prefix:
-                        self.event_bus.applyFileChangeRequested.emit(project_id, filepath, content, focus_prefix)
-                    )
-                    logger.info("ApplicationOrchestrator: Connected CodeViewerWindow apply signal to EventBus")
-                else:
-                    logger.warning("ApplicationOrchestrator: CodeViewerWindow missing apply_change_requested signal")
-
-            except Exception as e_code_viewer:
-                logger.error(f"ApplicationOrchestrator: Failed to create CodeViewerWindow: {e_code_viewer}")
-                self.code_viewer_window = None
-
-        return self.code_viewer_window
-
-    @Slot(str, str)
-    def _handle_modification_file_ready_for_display(self, filename: str, content: str):
-        """Handle when a file is ready to be displayed in the code viewer"""
-        logger.info(f"ApplicationOrchestrator: File ready for display: {filename} ({len(content)} chars)")
-
-        # Ensure code viewer exists
-        code_viewer = self._ensure_code_viewer_created()
-        if not code_viewer:
-            logger.error("ApplicationOrchestrator: Could not create/access code viewer for file display")
-            self.event_bus.uiErrorGlobal.emit("Code viewer not available", False)
-            return
-
-        # Get current project context for apply functionality
-        current_project_id = None
-        if self.chat_manager:
-            current_project_id = self.chat_manager.get_current_project_id()
-
-        # Show and focus the code viewer window
-        try:
-            code_viewer.show()
-            code_viewer.activateWindow()
-            code_viewer.raise_()
-
-            # Add/update the file in the code viewer
-            code_viewer.update_or_add_file(
-                filename=filename,
-                content=content,
-                is_ai_modification=True,
-                original_content=None,  # For new files, no original content
-                project_id_for_apply=current_project_id,
-                focus_prefix_for_apply=self._get_current_project_directory()
-            )
-
-            logger.info(f"ApplicationOrchestrator: File '{filename}' displayed in code viewer successfully")
-
-        except Exception as e:
-            logger.error(f"ApplicationOrchestrator: Error displaying file in code viewer: {e}")
-            self.event_bus.uiErrorGlobal.emit(f"Error displaying file in code viewer: {str(e)}", False)
+    # This method is removed as Orchestrator should not directly manage UI dialogs.
+    # Its role was to emit modificationFileReadyForDisplay, which it still does.
+    # @Slot(str, str)
+    # def _handle_modification_file_ready_for_display(self, filename: str, content: str):
+    #    pass
 
     @Slot(str, str, str, str)
     def _handle_apply_file_change_requested(self, project_id: str, relative_filepath: str, new_content: str,
                                             focus_prefix: str):
-        """Handle request to apply/save a file change to disk"""
         import os
-
         try:
             # Determine the full path for the file
-            if focus_prefix and os.path.isabs(focus_prefix):
-                full_path = os.path.join(focus_prefix, relative_filepath)
-            else:
-                # Use current working directory or project directory
-                project_dir = self._get_current_project_directory()
-                full_path = os.path.join(project_dir, relative_filepath)
+            # If focus_prefix is absolute and valid, use it. Otherwise, derive from project context.
+            if focus_prefix and os.path.isabs(focus_prefix) and os.path.isdir(
+                    os.path.dirname(os.path.join(focus_prefix, relative_filepath))):
+                base_dir_for_file = focus_prefix
+            else:  # Derive from project context
+                base_dir_for_file = self._get_current_project_directory(project_id_context=project_id)
+
+            full_path = os.path.join(base_dir_for_file, relative_filepath)
 
             # Ensure directory exists
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
-            # Write the file
             with open(full_path, 'w', encoding='utf-8') as f:
                 f.write(new_content)
 
             logger.info(f"ApplicationOrchestrator: Successfully applied file change: {full_path}")
             self.event_bus.uiStatusUpdateGlobal.emit(
-                f"File saved: {os.path.basename(relative_filepath)}",
-                "#98c379",
-                True,
-                3000
+                f"File saved: {os.path.basename(relative_filepath)}", "#98c379", True, 3000
             )
 
-            # Notify code viewer that apply completed
-            if self.code_viewer_window and hasattr(self.code_viewer_window, 'handle_apply_completed'):
-                self.code_viewer_window.handle_apply_completed(relative_filepath)
+            # Code viewer might listen for this or an "apply completed" signal
+            # For now, just logging. If CodeViewer needs explicit notification, an event could be added.
+            # if self.code_viewer_window and hasattr(self.code_viewer_window, 'handle_apply_completed'):
+            #     self.code_viewer_window.handle_apply_completed(relative_filepath)
 
         except Exception as e:
-            logger.error(f"ApplicationOrchestrator: Error applying file change for {relative_filepath}: {e}")
+            logger.error(f"ApplicationOrchestrator: Error applying file change for {relative_filepath}: {e}",
+                         exc_info=True)
             self.event_bus.uiErrorGlobal.emit(f"Failed to save file: {str(e)}", False)
 
-    def _get_current_project_directory(self) -> str:
-        """Get the current project's working directory"""
-        # For now, return current working directory
-        # This could be enhanced to use project-specific directories
+    def _get_current_project_directory(self, project_id_context: Optional[str] = None) -> str:
         import os
+        target_project_id = project_id_context
+        if not target_project_id and self.chat_manager:
+            target_project_id = self.chat_manager.get_current_project_id()
 
-        # If we have a chat manager with current project, use a project-specific directory
-        if self.chat_manager:
-            current_project_id = self.chat_manager.get_current_project_id()
-            if current_project_id and self.project_manager:
-                project_obj = self.project_manager.get_project_by_id(current_project_id)
-                if project_obj:
-                    # Create a safe directory name from project name
-                    safe_name = "".join(c for c in project_obj.name if c.isalnum() or c in (' ', '-', '_')).strip()
-                    safe_name = safe_name.replace(' ', '_')
-                    project_dir = os.path.join(os.getcwd(), "ava_generated_projects", safe_name)
-                    os.makedirs(project_dir, exist_ok=True)
-                    return project_dir
+        if target_project_id and self.project_manager:
+            return self.project_manager.get_project_files_dir(target_project_id)
 
-        return os.getcwd()
+        # Fallback if no specific project context
+        default_base = os.path.join(os.getcwd(), "ava_generated_projects")
+        default_project_dir_name = "default_project_output"
+        fallback_dir = os.path.join(default_base, default_project_dir_name)
+        os.makedirs(fallback_dir, exist_ok=True)
+        logger.warning(
+            f"Orchestrator._get_current_project_directory: No specific project context, using fallback: {fallback_dir}")
+        return fallback_dir
 
     def initialize_application_state(self):
         logger.info("Orchestrator: Initializing application state (project/session)...")
@@ -319,65 +265,71 @@ class ApplicationOrchestrator(QObject):
             logger.error("Orchestrator: ChatManager not set. Cannot initialize application state.")
             return
 
-        projects: List[Project] = self.project_manager.get_all_projects()  # type: ignore
-        active_project: Optional[Project] = None  # type: ignore
-        active_session: Optional[ChatSession] = None  # type: ignore
+        projects: List[Project] = self.project_manager.get_all_projects()
+        active_project: Optional[Project] = None
+        active_session: Optional[ChatSession] = None
 
         if not projects:
             logger.info("Orchestrator: No projects found. Creating a default project.")
-            active_project = self.project_manager.create_project(name="Default Project",
-                                                                 description="My first project")  # type: ignore
+            active_project = self.project_manager.create_project(name="Default Project", description="My first project")
             if active_project:
-                self.project_manager.switch_to_project(active_project.id)  # type: ignore
-                active_session = self.project_manager.get_current_session()  # type: ignore
+                self.project_manager.switch_to_project(active_project.id)
+                active_session = self.project_manager.get_current_session()
         else:
-            active_project = projects[0]
-            self.project_manager.switch_to_project(active_project.id)  # type: ignore
-            active_session = self.project_manager.get_current_session()  # type: ignore
-            if not active_session and active_project:
-                logger.info(f"Orchestrator: Project '{active_project.name}' has no active session. Creating one.")
-                active_session = self.project_manager.create_session(active_project.id, "Main Chat")  # type: ignore
-                if active_session:
-                    self.project_manager.switch_to_session(active_session.id)  # type: ignore
+            active_project = self.project_manager.get_current_project()
+            if not active_project:
+                active_project = projects[0]
+                self.project_manager.switch_to_project(active_project.id)
+            else:
+                self.project_manager.switch_to_project(active_project.id)  # Ensure it's properly switched
+
+            active_session = self.project_manager.get_current_session()
+            if not active_session and active_project:  # If project exists but no session is current for it
+                logger.info(
+                    f"Orchestrator: Project '{active_project.name}' has no current session. Trying to load/create one.")
+                project_sessions = self.project_manager.get_project_sessions(active_project.id)
+                if project_sessions:
+                    active_session = project_sessions[0]  # Default to first session
+                    self.project_manager.switch_to_session(active_session.id)
+                else:  # No sessions exist for this project, create one
+                    active_session = self.project_manager.create_session(active_project.id, "Main Chat")
+                    if active_session:
+                        self.project_manager.switch_to_session(active_session.id)
 
         if active_project and active_session:
             logger.info(
                 f"Orchestrator: Setting active session in ChatManager: P:{active_project.id}/S:{active_session.id}")
-            history_to_set: List[ChatMessage] = active_session.message_history  # type: ignore
+            history_to_set: List[ChatMessage] = active_session.message_history
             self.chat_manager.set_active_session(active_project.id, active_session.id, history_to_set)
         else:
             logger.error(
                 "Orchestrator: Failed to initialize or load a project/session. Chat functionality may be limited.")
             self.event_bus.uiErrorGlobal.emit("Failed to load or create an initial project/session.", True)
 
+    # ... (rest of the methods: _handle_create_new_project_requested, _handle_create_new_session_requested, _handle_message_finalized_for_session_persistence, _handle_project_deleted, getters)
+    # ... should remain largely the same as the last correct version you have for those ...
+
     @Slot(str, str)
     def _handle_create_new_project_requested(self, project_name: str, project_description: str):
-        """Handle request to create a new project."""
         logger.info(f"Orchestrator: Request to create new project: '{project_name}'")
-
         if not project_name or not project_name.strip():
             logger.warning("Orchestrator: Cannot create project with empty name")
             self.event_bus.uiErrorGlobal.emit("Project name cannot be empty.", False)
             return
-
         try:
-            new_project = self.project_manager.create_project(  # type: ignore
+            new_project = self.project_manager.create_project(
                 name=project_name.strip(),
                 description=project_description.strip() if project_description else ""
             )
-
             if new_project:
                 logger.info(f"Orchestrator: Successfully created project '{new_project.name}' (ID: {new_project.id})")
-
-                if self.project_manager.switch_to_project(new_project.id):  # type: ignore
-                    current_session = self.project_manager.get_current_session()  # type: ignore
-
+                if self.project_manager.switch_to_project(new_project.id):
+                    current_session = self.project_manager.get_current_session()
                     if current_session and self.chat_manager:
                         logger.info(
                             f"Orchestrator: Switching ChatManager to new project P:{new_project.id}/S:{current_session.id}")
-                        history_to_set: List[ChatMessage] = current_session.message_history  # type: ignore
+                        history_to_set: List[ChatMessage] = current_session.message_history
                         self.chat_manager.set_active_session(new_project.id, current_session.id, history_to_set)
-
                     self.event_bus.uiStatusUpdateGlobal.emit(f"Created and switched to project '{new_project.name}'",
                                                              "#98c379", True, 3000)
                 else:
@@ -386,7 +338,6 @@ class ApplicationOrchestrator(QObject):
             else:
                 logger.error(f"Orchestrator: Failed to create project '{project_name}'")
                 self.event_bus.uiErrorGlobal.emit(f"Failed to create project '{project_name}'.", False)
-
         except Exception as e:
             logger.error(f"Orchestrator: Error creating project '{project_name}': {e}", exc_info=True)
             self.event_bus.uiErrorGlobal.emit(f"Error creating project: {e}", False)
@@ -397,47 +348,42 @@ class ApplicationOrchestrator(QObject):
         if not self.chat_manager:
             logger.error("Orchestrator: ChatManager not available to handle new session.")
             return
-
-        current_project = self.project_manager.get_project_by_id(project_id)  # type: ignore
+        current_project = self.project_manager.get_project_by_id(project_id)
         if not current_project:
             logger.error(f"Orchestrator: Project with ID {project_id} not found. Cannot create new session.")
             self.event_bus.uiErrorGlobal.emit(f"Project {project_id} not found.", False)
             return
-
-        session_count = len(self.project_manager.get_project_sessions(project_id))  # type: ignore
+        session_count = len(self.project_manager.get_project_sessions(project_id))
         new_session_name = f"Chat Session {session_count + 1}"
-        new_session = self.project_manager.create_session(project_id, new_session_name)  # type: ignore
-
+        new_session = self.project_manager.create_session(project_id, new_session_name)
         if new_session:
-            self.project_manager.switch_to_session(new_session.id)  # type: ignore
+            self.project_manager.switch_to_session(new_session.id)
             logger.info(
                 f"Orchestrator: Switched to new session P:{project_id}/S:{new_session.id}. Updating ChatManager.")
-            history_to_set: List[ChatMessage] = new_session.message_history  # type: ignore
+            history_to_set: List[ChatMessage] = new_session.message_history
             self.chat_manager.set_active_session(project_id, new_session.id, history_to_set)
         else:
             logger.error(f"Orchestrator: Failed to create new session for project {project_id}.")
             self.event_bus.uiErrorGlobal.emit(f"Failed to create new session in project {project_id}.", False)
 
-    @Slot(str, str, str, ChatMessage, dict, bool)  # type: ignore
+    @Slot(str, str, str, ChatMessage, dict, bool)
     def _handle_message_finalized_for_session_persistence(self,
                                                           project_id: str,
                                                           session_id: str,
                                                           request_id: str,
-                                                          finalized_message_obj: ChatMessage,  # type: ignore
+                                                          finalized_message_obj: ChatMessage,
                                                           usage_stats_dict: dict,
                                                           is_error: bool):
         if not self.chat_manager:
             logger.error("Orchestrator: ChatManager not set. Cannot persist history.")
             return
-
         cm_pid = self.chat_manager.get_current_project_id()
         cm_sid = self.chat_manager.get_current_session_id()
-
         if project_id == cm_pid and session_id == cm_sid:
             logger.debug(
                 f"Orchestrator: Persisting history for P:{project_id}/S:{session_id} after message finalization.")
             current_history = self.chat_manager.get_current_chat_history()
-            self.project_manager.update_current_session_history(current_history)  # type: ignore
+            self.project_manager.update_current_session_history(current_history)
         else:
             logger.warning(f"Orchestrator: Received messageFinalized for P:{project_id}/S:{session_id}, "
                            f"but ChatManager active is P:{cm_pid}/S:{cm_sid}. History not persisted by this signal.")
@@ -446,7 +392,6 @@ class ApplicationOrchestrator(QObject):
     def _handle_project_deleted(self, deleted_project_id: str):
         logger.info(f"Orchestrator: Project {deleted_project_id} was deleted.")
         if not self.chat_manager: return
-
         current_cm_pid = self.chat_manager.get_current_project_id()
         if current_cm_pid == deleted_project_id:
             logger.info(
@@ -468,25 +413,21 @@ class ApplicationOrchestrator(QObject):
     def get_all_backend_adapters_dict(self) -> Dict[str, BackendInterface]:
         return self._all_backend_adapters_dict
 
-    def get_project_manager(self) -> ProjectManager:  # type: ignore
+    def get_project_manager(self) -> ProjectManager:
         return self.project_manager
 
-    def get_upload_service(self) -> UploadService:  # type: ignore
-        """Returns the initialized UploadService instance."""
+    def get_upload_service(self) -> Optional[UploadService]:
         return self.upload_service
 
-    def get_rag_handler(self) -> RagHandler:  # type: ignore
-        """Returns the initialized RagHandler instance."""
+    def get_rag_handler(self) -> Optional[RagHandler]:
         return self.rag_handler
 
-    def get_terminal_service(self) -> TerminalService:
-        """Returns the initialized TerminalService instance."""
+    def get_terminal_service(self) -> Optional[TerminalService]:
         return self.terminal_service
 
-    def get_update_service(self) -> Optional[UpdateService]:  # NEW GETTER
-        """Returns the initialized UpdateService instance."""
+    def get_update_service(self) -> Optional[UpdateService]:
         return self.update_service
 
-    def get_code_viewer_window(self) -> Optional[CodeViewerWindow]:
-        """Returns the initialized CodeViewerWindow instance."""
-        return self._ensure_code_viewer_created()
+    # This getter is removed as Orchestrator no longer directly holds the code_viewer_window instance
+    # def get_code_viewer_window(self) -> Optional[CodeViewerWindow]:
+    #     return self._ensure_code_viewer_created()
