@@ -25,13 +25,16 @@ class EventBus(QObject):
     # Orchestrator-level request for new session
     createNewSessionForProjectRequested = Signal(str)  # project_id (ChatManager emits this)
 
-    # UI Navigation / Dialog Triggers
+    # Add this signal to the existing signals in core/event_bus.py
+
+    # UI Navigation / Dialog Triggers section
     showLlmLogWindowRequested = Signal()
     chatLlmPersonalityEditRequested = Signal()
     viewCodeViewerRequested = Signal()
-    createNewProjectRequested = Signal(str, str) # project_name, project_description
+    showProjectRagDialogRequested = Signal()  # NEW: For project RAG file dialog
+    createNewProjectRequested = Signal(str, str)  # project_name, project_description
     openProjectSelectorRequested = Signal()
-    renameCurrentSessionRequested = Signal(str) # new_session_name
+    renameCurrentSessionRequested = Signal(str)  # new_session_name
 
     # Backend & LLM Communication
     backendConfigurationChanged = Signal(str, str, bool, list) # backend_id, model_name, is_configured, available_models

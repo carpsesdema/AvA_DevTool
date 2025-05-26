@@ -47,6 +47,7 @@ class DialogService(QObject):
         bus.showLlmLogWindowRequested.connect(self.show_llm_terminal_window)
         bus.chatLlmPersonalityEditRequested.connect(self.trigger_edit_personality_dialog)
         bus.viewCodeViewerRequested.connect(lambda: self.show_code_viewer(ensure_creation=True))
+        bus.showProjectRagDialogRequested.connect(self.trigger_show_project_rag_dialog)
         # MODIFICATION: Add subscription to show Project RAG Dialog
         # This signal will be emitted by LeftControlPanel's button
         # An alternative would be for LeftControlPanel to call a method on DialogService directly.

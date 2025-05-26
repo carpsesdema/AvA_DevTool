@@ -295,19 +295,21 @@ class LeftControlPanel(QWidget):
         else:
             logger.info("LCP: Global RAG directory scan selection cancelled.")
 
+    # Updated method for ui/left_panel.py
+
     @Slot()
     def _on_add_project_files_requested(self):
         logger.info("LCP: 'Add Files (Project RAG)' button clicked.")
-        # MODIFICATION: This will now call the DialogService to show the ProjectRagDialog
-        parent_window = self.parent() # Assuming MainWindow is the parent
-        if parent_window and hasattr(parent_window, 'dialog_service') and \
-           hasattr(parent_window.dialog_service, 'trigger_show_project_rag_dialog'):
-            logger.debug("LCP: Calling DialogService to show Project RAG dialog.")
-            parent_window.dialog_service.trigger_show_project_rag_dialog()
-        else:
-            logger.error("LCP: Could not find DialogService or trigger_show_project_rag_dialog method on parent."
-                         " Project RAG dialog cannot be shown.")
-            self._event_bus.uiErrorGlobal.emit("Cannot open project RAG dialog: Internal setup error.", False)
+
+        # Check if we have an active project
+        if not self.chat_manager.get_current_project_id():
+            logger.warning("LCP: No active project for RAG file addition.")
+            self._event_bus.uiErrorGlobal.emit("No active project selected for adding RAG files.", False)
+            return
+
+        # Use EventBus to request the dialog - this is more robust than direct calls
+        logger.debug("LCP: Emitting showProjectRagDialogRequested event.")
+        self._event_bus.showProjectRagDialogRequested.emit()
 
 
     @Slot(QListWidgetItem, QListWidgetItem)
