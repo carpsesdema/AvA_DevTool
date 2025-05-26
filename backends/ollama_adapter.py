@@ -129,36 +129,38 @@ class OllamaAdapter(BackendInterface):
                     options=ollama_api_options
                 )
 
-            # FIXED: Get the stream iterator properly
+            # Get the stream iterator
             stream_iterator = await asyncio.to_thread(_blocking_ollama_stream_call)
 
-            # FIXED: Process the stream correctly
-            def _process_ollama_stream():
-                for chunk in stream_iterator:
-                    if not isinstance(chunk, dict):
-                        continue
+            # FIXED: Process stream chunk by chunk instead of all at once
+            chunk_count = 0
+            for chunk in stream_iterator:
+                chunk_count += 1
 
-                    if chunk.get("error"):
-                        error_msg = chunk["error"]
-                        self._last_error = error_msg
-                        yield f"[SYSTEM ERROR: {error_msg}]"
-                        if chunk.get('done', False):
-                            self._last_prompt_tokens = chunk.get('prompt_eval_count')
-                            self._last_completion_tokens = chunk.get('eval_count')
-                        return
+                if not isinstance(chunk, dict):
+                    continue
 
-                    content_part = chunk.get('message', {}).get('content', '')
-                    if content_part:
-                        yield content_part
-
+                if chunk.get("error"):
+                    error_msg = chunk["error"]
+                    self._last_error = error_msg
+                    yield f"[SYSTEM ERROR: {error_msg}]"
                     if chunk.get('done', False):
                         self._last_prompt_tokens = chunk.get('prompt_eval_count')
                         self._last_completion_tokens = chunk.get('eval_count')
-                        break
+                    return
 
-            # Process the stream in a thread and yield chunks
-            for chunk_text in await asyncio.to_thread(lambda: list(_process_ollama_stream())):
-                yield chunk_text
+                content_part = chunk.get('message', {}).get('content', '')
+                if content_part:
+                    yield content_part
+
+                # CRITICAL: Yield control every few chunks to prevent GUI blocking
+                if chunk_count % 3 == 0:
+                    await asyncio.sleep(0)
+
+                if chunk.get('done', False):
+                    self._last_prompt_tokens = chunk.get('prompt_eval_count')
+                    self._last_completion_tokens = chunk.get('eval_count')
+                    break
 
         except ollama.ResponseError as e_resp:  # type: ignore
             self._last_error = f"Ollama API Response Error: {e_resp.status_code} - {e_resp.error}"  # type: ignore

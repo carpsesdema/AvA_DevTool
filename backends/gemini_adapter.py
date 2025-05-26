@@ -145,48 +145,50 @@ class GeminiAdapter(BackendInterface):
 
             stream_response = await asyncio.to_thread(_initiate_stream_call_in_thread)
 
-            # FIXED: The issue is here - we need to iterate properly
-            async def _process_stream():
-                for chunk in stream_response:
-                    if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback and \
-                            hasattr(chunk.prompt_feedback, 'block_reason') and chunk.prompt_feedback.block_reason:
-                        err_msg = f"Content blocked (prompt feedback): {chunk.prompt_feedback.block_reason}."
-                        self._last_error = err_msg
-                        yield f"[SYSTEM ERROR: {err_msg}]"
-                        return
+            # FIXED: Process stream chunk by chunk with periodic yielding
+            chunk_count = 0
+            for chunk in stream_response:
+                chunk_count += 1
 
-                    if hasattr(chunk, 'candidates') and chunk.candidates:
-                        for candidate in chunk.candidates:
-                            if hasattr(candidate, 'finish_reason') and candidate.finish_reason and \
-                                    candidate.finish_reason.name not in ["STOP", "MAX_TOKENS", "UNSPECIFIED", "NULL"]:
-                                err_msg = f"Generation stopped. Reason: {candidate.finish_reason.name}."
-                                if hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
-                                    err_msg += f" Details: {candidate.safety_ratings}"
-                                self._last_error = err_msg
-                                yield f"[SYSTEM ERROR: {err_msg}]"
-                                return
+                if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback and \
+                        hasattr(chunk.prompt_feedback, 'block_reason') and chunk.prompt_feedback.block_reason:
+                    err_msg = f"Content blocked (prompt feedback): {chunk.prompt_feedback.block_reason}."
+                    self._last_error = err_msg
+                    yield f"[SYSTEM ERROR: {err_msg}]"
+                    return
 
-                    text_parts_from_chunk = []
-                    if hasattr(chunk, 'parts') and chunk.parts:
-                        for part in chunk.parts:
-                            if hasattr(part, 'text') and part.text is not None:
-                                text_parts_from_chunk.append(part.text)
-                    elif hasattr(chunk, 'text') and chunk.text is not None:
-                        text_parts_from_chunk.append(chunk.text)
-                    elif hasattr(chunk, 'candidates') and chunk.candidates:
-                        for cand in chunk.candidates:
-                            if hasattr(cand, 'content') and cand.content and \
-                                    hasattr(cand.content, 'parts') and cand.content.parts:
-                                for part in cand.content.parts:
-                                    if hasattr(part, 'text') and part.text is not None:
-                                        text_parts_from_chunk.append(part.text)
+                if hasattr(chunk, 'candidates') and chunk.candidates:
+                    for candidate in chunk.candidates:
+                        if hasattr(candidate, 'finish_reason') and candidate.finish_reason and \
+                                candidate.finish_reason.name not in ["STOP", "MAX_TOKENS", "UNSPECIFIED", "NULL"]:
+                            err_msg = f"Generation stopped. Reason: {candidate.finish_reason.name}."
+                            if hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
+                                err_msg += f" Details: {candidate.safety_ratings}"
+                            self._last_error = err_msg
+                            yield f"[SYSTEM ERROR: {err_msg}]"
+                            return
 
-                    if text_parts_from_chunk:
-                        yield "".join(text_parts_from_chunk)
+                text_parts_from_chunk = []
+                if hasattr(chunk, 'parts') and chunk.parts:
+                    for part in chunk.parts:
+                        if hasattr(part, 'text') and part.text is not None:
+                            text_parts_from_chunk.append(part.text)
+                elif hasattr(chunk, 'text') and chunk.text is not None:
+                    text_parts_from_chunk.append(chunk.text)
+                elif hasattr(chunk, 'candidates') and chunk.candidates:
+                    for cand in chunk.candidates:
+                        if hasattr(cand, 'content') and cand.content and \
+                                hasattr(cand.content, 'parts') and cand.content.parts:
+                            for part in cand.content.parts:
+                                if hasattr(part, 'text') and part.text is not None:
+                                    text_parts_from_chunk.append(part.text)
 
-            # Process the stream in a thread
-            async for chunk_text in _process_stream():
-                yield chunk_text
+                if text_parts_from_chunk:
+                    yield "".join(text_parts_from_chunk)
+
+                # CRITICAL: Yield control every few chunks to prevent GUI blocking
+                if chunk_count % 3 == 0:
+                    await asyncio.sleep(0)
 
             # Get usage stats from the final response
             if hasattr(stream_response, 'usage_metadata') and stream_response.usage_metadata:
