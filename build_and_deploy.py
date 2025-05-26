@@ -10,7 +10,7 @@ This script handles:
 4. Managing version updates
 
 Usage:
-    python build_and_deploy.py --version 1.0.5 --changelog "Bug fixes and improvements"
+    python build_and_deploy.py --version 1.0.6 --changelog "Bug fixes and improvements"
 """
 
 import os
