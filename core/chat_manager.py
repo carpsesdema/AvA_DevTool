@@ -26,9 +26,9 @@ try:
     from core.user_input_handler import UserInputHandler, UserInputIntent
     from core.plan_and_code_coordinator import PlanAndCodeCoordinator
 except ImportError as e:
-    ProjectManager = type("ProjectManager", (object,), {})  # type: ignore
-    UploadService = type("UploadService", (object,), {})  # type: ignore
-    RagHandler = type("RagHandler", (object,), {})  # type: ignore
+    ProjectManager = type("ProjectManager", (object,), {})
+    UploadService = type("UploadService", (object,), {})
+    RagHandler = type("RagHandler", (object,), {})
     logging.getLogger(__name__).critical(f"Critical import error in ChatManager: {e}", exc_info=True)
     raise
 
@@ -50,7 +50,7 @@ class ChatManager(QObject):
         self._upload_service = self._orchestrator.get_upload_service()
         self._rag_handler = self._orchestrator.get_rag_handler()
 
-        if not isinstance(self._project_manager, ProjectManager):  # type: ignore
+        if not isinstance(self._project_manager, ProjectManager):
             logger.critical("ChatManager received an invalid ProjectManager instance.")
             raise TypeError("ChatManager requires a valid ProjectManager instance from Orchestrator.")
 
@@ -62,7 +62,7 @@ class ChatManager(QObject):
             parent=self
         )
 
-        self._current_chat_history: List[ChatMessage] = []  # type: ignore
+        self._current_chat_history: List[ChatMessage] = []
         self._current_project_id: Optional[str] = None
         self._current_session_id: Optional[str] = None
         self._active_chat_backend_id: str = constants.DEFAULT_CHAT_BACKEND_ID
@@ -98,7 +98,7 @@ class ChatManager(QObject):
                                 constants.CODER_AI_SYSTEM_PROMPT)
         self._check_rag_readiness_and_emit_status()
 
-    def set_active_session(self, project_id: str, session_id: str, history: List[ChatMessage]):  # type: ignore
+    def set_active_session(self, project_id: str, session_id: str, history: List[ChatMessage]):
         logger.info(f"CM: Setting active session to P:{project_id}/S:{session_id}. History items: {len(history)}")
         old_project_id = self._current_project_id
         self._current_project_id = project_id
@@ -109,6 +109,7 @@ class ChatManager(QObject):
             self._backend_coordinator.cancel_current_task(self._current_llm_request_id)
             self._current_llm_request_id = None
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
+            self._event_bus.hideLoader.emit()  # Ensure loader is hidden if a task was cancelled
 
         # Clear any pending file creation requests when switching sessions
         self._file_creation_request_ids.clear()
@@ -157,29 +158,36 @@ class ChatManager(QObject):
 
     def _configure_backend(self, backend_id: str, model_name: str, system_prompt: Optional[str]):
         logger.info(f"CM: Configuring backend '{backend_id}' with model '{model_name}'")
-        api_key_to_use: Optional[str] = None
-        actual_system_prompt = system_prompt
-        if backend_id == constants.GENERATOR_BACKEND_ID:  # type: ignore
-            actual_system_prompt = constants.CODER_AI_SYSTEM_PROMPT  # type: ignore
-            logger.info(f"CM: Using CODER_AI_SYSTEM_PROMPT for {backend_id}")
-        if backend_id == "gemini_chat_default":
-            api_key_to_use = get_gemini_api_key()
-        elif backend_id == "gpt_chat_default":
-            api_key_to_use = get_openai_api_key()
-        elif backend_id in [constants.GENERATOR_BACKEND_ID, "ollama_chat_default"]:  # type: ignore
-            api_key_to_use = None  # Ollama doesn't use API keys in the same way
-        if backend_id in ["gemini_chat_default", "gpt_chat_default"] and not api_key_to_use:
-            err_msg = f"{backend_id.split('_')[0].upper()} API Key not found. Set in .env"
-            logger.error(err_msg)
-            if backend_id == self._active_chat_backend_id:
-                self._is_chat_backend_configured = False
-            elif backend_id == self._active_specialized_backend_id:
-                self._is_specialized_backend_configured = False
-            self._event_bus.backendConfigurationChanged.emit(backend_id, model_name, False, [])
-            self._emit_status_update(err_msg, "#FF6B6B")
-            return
-        self._backend_coordinator.configure_backend(backend_id=backend_id, api_key=api_key_to_use,
-                                                    model_name=model_name, system_prompt=actual_system_prompt)
+        self._event_bus.showLoader.emit(f"Configuring {model_name}...")
+        try:
+            api_key_to_use: Optional[str] = None
+            actual_system_prompt = system_prompt
+            if backend_id == constants.GENERATOR_BACKEND_ID:
+                actual_system_prompt = constants.CODER_AI_SYSTEM_PROMPT
+                logger.info(f"CM: Using CODER_AI_SYSTEM_PROMPT for {backend_id}")
+            if backend_id == "gemini_chat_default":
+                api_key_to_use = get_gemini_api_key()
+            elif backend_id == "gpt_chat_default":
+                api_key_to_use = get_openai_api_key()
+            elif backend_id in [constants.GENERATOR_BACKEND_ID, "ollama_chat_default"]:
+                api_key_to_use = None  # Ollama doesn't use API keys in the same way
+
+            if backend_id in ["gemini_chat_default", "gpt_chat_default"] and not api_key_to_use:
+                err_msg = f"{backend_id.split('_')[0].upper()} API Key not found. Set in .env"
+                logger.error(err_msg)
+                if backend_id == self._active_chat_backend_id:
+                    self._is_chat_backend_configured = False
+                elif backend_id == self._active_specialized_backend_id:
+                    self._is_specialized_backend_configured = False
+                self._event_bus.backendConfigurationChanged.emit(backend_id, model_name, False, [])
+                self._emit_status_update(err_msg, "#FF6B6B")
+                # self._event_bus.hideLoader.emit() # Already handled by finally
+                return
+
+            self._backend_coordinator.configure_backend(backend_id=backend_id, api_key=api_key_to_use,
+                                                        model_name=model_name, system_prompt=actual_system_prompt)
+        finally:
+            self._event_bus.hideLoader.emit()
 
     def _detect_file_creation_intent(self, user_text: str) -> Optional[str]:
         """Detect if user wants to create a specific file and return the filename"""
@@ -201,28 +209,93 @@ class ChatManager(QObject):
 
         return None
 
-    def _create_file_creation_prompt(self, user_text: str, filename: str) -> str:
-        """Create a specialized prompt for file creation"""
-        return f"""You are a helpful coding assistant. The user wants you to create a file called '{filename}' based on their request.
+    def _detect_task_type(self, user_text: str, filename: str) -> str:
+        """Detect what type of coding task this is based on user text and filename"""
+        user_lower = user_text.lower()
+        filename_lower = filename.lower()
+
+        # API-related patterns
+        api_patterns = [
+            r'\b(api|endpoint|route|fastapi|flask|django|rest|http|get|post|put|delete)\b',
+            r'\b(server|web service|microservice|backend)\b'
+        ]
+
+        # Data processing patterns
+        data_patterns = [
+            r'\b(data|csv|json|xml|parse|process|analyze|transform|clean)\b',
+            r'\b(pandas|numpy|database|sql|query|etl)\b'
+        ]
+
+        # UI patterns
+        ui_patterns = [
+            r'\b(ui|interface|window|dialog|widget|button|form|gui)\b',
+            r'\b(pyside|pyqt|tkinter|qt|frontend)\b'
+        ]
+
+        # Check filename hints
+        if any(term in filename_lower for term in ['api', 'server', 'endpoint', 'route']):
+            return 'api'
+        elif any(term in filename_lower for term in ['data', 'process', 'parse', 'etl']):
+            return 'data_processing'
+        elif any(term in filename_lower for term in ['ui', 'window', 'dialog', 'widget', 'gui']):
+            return 'ui'
+        elif any(term in filename_lower for term in ['util', 'helper', 'tool', 'lib']):
+            return 'utility'
+
+        # Check user text patterns
+        for pattern in api_patterns:
+            if re.search(pattern, user_lower):
+                return 'api'
+
+        for pattern in data_patterns:
+            if re.search(pattern, user_lower):
+                return 'data_processing'
+
+        for pattern in ui_patterns:
+            if re.search(pattern, user_lower):
+                return 'ui'
+
+        return 'general'  # Default fallback
+
+    def _get_specialized_prompt(self, task_type: str, user_text: str, filename: str) -> str:
+        """Get specialized prompt based on detected task type"""
+
+        base_instruction = f"""You are Devstral, an expert coding assistant. The user wants you to create a file called '{filename}' based on their request.
 
 User request: {user_text}
 
-Please generate the complete, functional Python code for '{filename}'. Your response should contain:
+"""
 
-1. Complete, working Python code
-2. Proper imports
-3. Clear function/class definitions with docstrings
-4. Type hints where appropriate
-5. Error handling where needed
-6. Comments explaining complex logic
+        if task_type == 'api':
+            return base_instruction + constants.API_DEVELOPMENT_PROMPT + f"""
 
-Format your response as a single Python code block like this:
-```python
-# {filename}
-# Your complete code here
-```
+Create complete, production-ready code for '{filename}' that implements the requested API functionality."""
 
-Make the code production-ready and well-structured."""
+        elif task_type == 'data_processing':
+            return base_instruction + constants.DATA_PROCESSING_PROMPT + f"""
+
+Create complete, production-ready code for '{filename}' that handles the requested data processing."""
+
+        elif task_type == 'ui':
+            return base_instruction + constants.UI_DEVELOPMENT_PROMPT + f"""
+
+Create complete, production-ready code for '{filename}' that implements the requested UI."""
+
+        elif task_type == 'utility':
+            return base_instruction + constants.UTILITY_DEVELOPMENT_PROMPT + f"""
+
+Create complete, production-ready code for '{filename}' that provides the requested utility functionality."""
+
+        else:  # general
+            return base_instruction + constants.GENERAL_CODING_PROMPT + f"""
+
+Create complete, production-ready code for '{filename}' that fulfills the user's request."""
+
+    def _create_file_creation_prompt(self, user_text: str, filename: str) -> str:
+        """Create a specialized prompt for file creation with task-specific optimization"""
+        task_type = self._detect_task_type(user_text, filename)
+        logger.info(f"CM: Detected task type '{task_type}' for file '{filename}'")
+        return self._get_specialized_prompt(task_type, user_text, filename)
 
     @Slot(str, str, bool, list)
     def _handle_backend_reconfigured_event(self, backend_id: str, model_name: str, is_configured: bool,
@@ -234,6 +307,8 @@ Make the code production-ready and well-structured."""
             self._is_chat_backend_configured = is_configured
         elif backend_id == self._active_specialized_backend_id:
             self._is_specialized_backend_configured = is_configured
+
+        # Status updates are emitted by this event, no need to hide loader here as _configure_backend handles it.
         if is_active_chat:
             if is_configured:
                 self._emit_status_update(f"Ready. Using {self._active_chat_model_name}", "#98c379", False)
@@ -268,8 +343,8 @@ Make the code production-ready and well-structured."""
             return
 
         user_msg_parts = [user_msg_txt] if user_msg_txt else []
-        if image_data: user_msg_parts.extend(image_data)  # type: ignore
-        user_message = ChatMessage(role=USER_ROLE, parts=user_msg_parts)  # type: ignore
+        if image_data: user_msg_parts.extend(image_data)
+        user_message = ChatMessage(role=USER_ROLE, parts=user_msg_parts)
         self._current_chat_history.append(user_message)
         self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, user_message)
         self._log_llm_comm("USER", user_msg_txt)
@@ -279,9 +354,9 @@ Make the code production-ready and well-structured."""
         elif processed_input.intent == UserInputIntent.FILE_CREATION_REQUEST:
             self._handle_file_creation_request(user_msg_txt, processed_input.data.get('filename'))
         elif processed_input.intent == UserInputIntent.PLAN_THEN_CODE_REQUEST:
-            self._handle_plan_then_code_request(user_msg_txt)
+            self._handle_plan_then_code_request(user_msg_txt)  # Loader handled by PlanAndCodeCoordinator
         else:
-            unknown_intent_msg = ChatMessage(role=ERROR_ROLE,  # type: ignore
+            unknown_intent_msg = ChatMessage(role=ERROR_ROLE,
                                              parts=[f"[System: Unknown request type: {user_msg_txt[:50]}...]"])
             self._current_chat_history.append(unknown_intent_msg)
             if self._current_project_id and self._current_session_id:
@@ -290,24 +365,25 @@ Make the code production-ready and well-structured."""
 
     async def _handle_normal_chat_async(self, user_msg_txt: str, image_data: List[Dict[str, Any]]):
         """Handle normal chat interaction with async RAG support"""
+        self._event_bus.showLoader.emit("Thinking...")
         if not self._is_chat_backend_configured:
-            err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,  # type: ignore
+            err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
                                       parts=["[Error: Chat Backend not ready.]"])
             self._current_chat_history.append(err_msg_obj)
             self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update("Cannot send: Chat AI backend not configured.", "#FF6B6B")
+            self._event_bus.hideLoader.emit()
             return
 
         history_for_llm = self._current_chat_history[:]
         rag_context_str = ""
 
-        # NEW: Wait for embedder to be ready if RAG is needed
         should_use_rag = self._rag_handler.should_perform_rag(user_msg_txt, self._is_rag_ready,
-                                                              self._is_rag_ready)  # type: ignore
+                                                              self._is_rag_ready)
 
         if should_use_rag and self._upload_service:
-            # Check if embedder is ready, if not wait for it
+            self._event_bus.updateLoaderMessage.emit("Searching context...")
             if not self._upload_service._embedder_ready:
                 self._emit_status_update("Waiting for RAG system to initialize...", "#e5c07b", False)
                 embedder_ready = await self._upload_service.wait_for_embedder_ready(timeout_seconds=10.0)
@@ -318,24 +394,22 @@ Make the code production-ready and well-structured."""
 
         if should_use_rag and self._rag_handler:
             logger.info(f"CM: Performing RAG for query: '{user_msg_txt[:50]}'")
-            self._emit_status_update("Searching RAG context...", "#61afef", True, 1500)
-            query_entities = self._rag_handler.extract_code_entities(user_msg_txt)  # type: ignore
-            # MODIFICATION: Pass current project_id for project-specific RAG
-            rag_context_str, queried_collections = self._rag_handler.get_formatted_context(  # type: ignore
+            query_entities = self._rag_handler.extract_code_entities(user_msg_txt)
+            rag_context_str, queried_collections = self._rag_handler.get_formatted_context(
                 query=user_msg_txt,
                 query_entities=query_entities,
-                project_id=self._current_project_id,  # Explicitly pass current project ID
+                project_id=self._current_project_id,
                 explicit_focus_paths=[],
                 implicit_focus_paths=[],
                 is_modification_request=False
             )
             if rag_context_str:
                 logger.info(f"CM: RAG context found from collections: {queried_collections}. Prepending to prompt.")
-                rag_system_message = ChatMessage(role=SYSTEM_ROLE, parts=[rag_context_str],  # type: ignore
+                rag_system_message = ChatMessage(role=SYSTEM_ROLE, parts=[rag_context_str],
                                                  metadata={"is_rag_context": True,
                                                            "queried_collections": queried_collections})
-                history_for_llm.insert(-1, rag_system_message)  # Insert before the last user message
-                rag_notification_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE,  # type: ignore
+                history_for_llm.insert(-1, rag_system_message)
+                rag_notification_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE,
                                                    parts=[
                                                        f"[System: RAG used. Context from: {', '.join(queried_collections)}.]"],
                                                    metadata={"is_internal": True})
@@ -346,24 +420,26 @@ Make the code production-ready and well-structured."""
             else:
                 logger.info("CM: No relevant RAG context found for query.")
 
+        self._event_bus.updateLoaderMessage.emit(f"Sending to {self._active_chat_model_name}...")
         success, err, req_id = self._backend_coordinator.initiate_llm_chat_request(self._active_chat_backend_id,
                                                                                    history_for_llm, {
                                                                                        "temperature": self._active_temperature})
         if not success or not req_id:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
-                                      parts=[f"[Error sending: {err}]"])  # type: ignore
+                                      parts=[f"[Error sending: {err}]"])
             self._current_chat_history.append(err_msg_obj)
             self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update(f"Failed to start chat: {err or 'Unknown'}", "#FF6B6B")
+            self._event_bus.hideLoader.emit()
             return
         self._current_llm_request_id = req_id
         placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""],
-                                  loading_state=MessageLoadingState.LOADING)  # type: ignore
+                                  loading_state=MessageLoadingState.LOADING)
         self._current_chat_history.append(placeholder)
         self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                       placeholder)
-        self._emit_status_update(f"Sending to {self._active_chat_model_name}...", "#61afef")
+        # self._emit_status_update(f"Sending to {self._active_chat_model_name}...", "#61afef") # Now part of loader
         self._backend_coordinator.start_llm_streaming_task(req_id, self._active_chat_backend_id, history_for_llm,
                                                            False, {"temperature": self._active_temperature},
                                                            {"purpose": "normal_chat",
@@ -377,44 +453,42 @@ Make the code production-ready and well-structured."""
             return
 
         if not filename:
-            # If no filename detected, try to extract one from the message
             filename = self._detect_file_creation_intent(user_msg_txt)
             if not filename:
-                # Fall back to normal chat if we can't determine a filename
                 asyncio.create_task(self._handle_normal_chat_async(user_msg_txt, []))
                 return
 
+        self._event_bus.showLoader.emit(f"Crafting {filename}...")
         logger.info(f"CM: Handling file creation request for '{filename}'")
 
-        # Create specialized prompt for file creation
         file_creation_prompt = self._create_file_creation_prompt(user_msg_txt, filename)
         history_for_llm = [ChatMessage(role=USER_ROLE, parts=[file_creation_prompt])]
 
         success, err, req_id = self._backend_coordinator.initiate_llm_chat_request(
             self._active_chat_backend_id,
             history_for_llm,
-            {"temperature": 0.2}  # Lower temperature for code generation
+            {"temperature": 0.2}
         )
 
         if not success or not req_id:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE,
-                                      parts=[f"[Error creating file: {err}]"])  # type: ignore
+                                      parts=[f"[Error creating file: {err}]"])
             self._current_chat_history.append(err_msg_obj)
             self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update(f"Failed to start file creation: {err or 'Unknown'}", "#FF6B6B")
+            self._event_bus.hideLoader.emit()
             return
 
-        # Track this as a file creation request
         self._file_creation_request_ids[req_id] = filename
         self._current_llm_request_id = req_id
 
         placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""],
-                                  loading_state=MessageLoadingState.LOADING)  # type: ignore
+                                  loading_state=MessageLoadingState.LOADING)
         self._current_chat_history.append(placeholder)
         self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                       placeholder)
-        self._emit_status_update(f"Creating {filename}...", "#61afef")
+        # self._emit_status_update(f"Creating {filename}...", "#61afef") # Now part of loader
 
         self._backend_coordinator.start_llm_streaming_task(
             req_id,
@@ -436,10 +510,13 @@ Make the code production-ready and well-structured."""
             self._emit_status_update("Planner or Code LLM not configured.", "#e06c75", True, 5000)
             return
 
-        # Get current project directory for file operations
         current_project_dir = self._get_current_project_directory()
 
-        self._plan_and_code_coordinator.start_planning_sequence(  # type: ignore
+        # Detect the overall task type for the project
+        task_type = self._detect_task_type(user_msg_txt, "multi_file_project")
+
+        # Loader for plan-then-code is handled within PlanAndCodeCoordinator
+        self._plan_and_code_coordinator.start_planning_sequence(
             user_query=user_msg_txt,
             planner_llm_backend_id=self._active_chat_backend_id,
             planner_llm_model_name=self._active_chat_model_name,
@@ -447,8 +524,9 @@ Make the code production-ready and well-structured."""
             specialized_llm_backend_id=self._active_specialized_backend_id,
             specialized_llm_model_name=self._active_specialized_model_name,
             project_files_dir=current_project_dir,
-            project_id=self._current_project_id,  # NEW: Pass project context
-            session_id=self._current_session_id  # NEW: Pass session context
+            project_id=self._current_project_id,
+            session_id=self._current_session_id,
+            user_task_type=task_type
         )
 
     def _get_current_project_directory(self) -> str:
@@ -456,31 +534,24 @@ Make the code production-ready and well-structured."""
         import os
         from datetime import datetime
 
-        # Option 1: Check if user has a configured project directory
-        # (You could add this to user settings later)
         user_projects_dir = getattr(self, '_user_projects_directory', None)
         if user_projects_dir and os.path.exists(user_projects_dir):
             return user_projects_dir
 
-        # Option 2: Create organized output structure
         base_output_dir = os.path.join(os.getcwd(), "ava_generated_projects")
 
-        # Create project-specific subdirectory based on current AvA project
         if self._current_project_id and self._project_manager:
             project_obj = self._project_manager.get_project_by_id(self._current_project_id)
             if project_obj:
-                # Use project name as folder (sanitized)
                 safe_project_name = "".join(c for c in project_obj.name if c.isalnum() or c in (' ', '-', '_')).strip()
                 safe_project_name = safe_project_name.replace(' ', '_')
                 project_output_dir = os.path.join(base_output_dir, safe_project_name)
             else:
                 project_output_dir = os.path.join(base_output_dir, f"project_{self._current_project_id[:8]}")
         else:
-            # Ultimate fallback: timestamped folder
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             project_output_dir = os.path.join(base_output_dir, f"untitled_project_{timestamp}")
 
-        # Ensure directory exists
         os.makedirs(project_output_dir, exist_ok=True)
         logger.info(f"CM: Using project directory: {project_output_dir}")
 
@@ -488,19 +559,16 @@ Make the code production-ready and well-structured."""
 
     def _extract_code_from_response(self, response_text: str) -> Optional[str]:
         """Extract code from LLM response, handling various code block formats"""
-        # Try to find Python code blocks first
         python_pattern = r"```python\s*\n(.*?)```"
         match = re.search(python_pattern, response_text, re.DOTALL | re.IGNORECASE)
         if match:
             return match.group(1).strip()
 
-        # Try generic code blocks
         generic_pattern = r"```.*?\n(.*?)```"
         match = re.search(generic_pattern, response_text, re.DOTALL)
         if match:
             return match.group(1).strip()
 
-        # If no code blocks found, return None
         return None
 
     @Slot()
@@ -513,87 +581,90 @@ Make the code production-ready and well-structured."""
             self._backend_coordinator.cancel_current_task(request_id=self._current_llm_request_id)
             self._current_llm_request_id = None
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
+            self._event_bus.hideLoader.emit()  # Ensure loader is hidden
         self._event_bus.createNewSessionForProjectRequested.emit(self._current_project_id)
 
-    @Slot(str)  # MODIFICATION: Slot for global RAG scan, only dir_path
+    @Slot(str)
     def request_global_rag_scan_directory(self, dir_path: str):
         if not self._upload_service or not self._upload_service.is_vector_db_ready(
-                constants.GLOBAL_COLLECTION_ID):  # type: ignore
+                constants.GLOBAL_COLLECTION_ID):
             self._emit_status_update(f"RAG system not ready for Global Knowledge. Cannot scan.", "#FF6B6B", True, 4000)
             return
 
         logger.info(f"CM: Requesting GLOBAL RAG scan for directory: {dir_path}")
-        self._emit_status_update(f"Scanning '{os.path.basename(dir_path)}' for Global RAG...", "#61afef", False)
+        self._event_bus.showLoader.emit(f"Scanning '{os.path.basename(dir_path)}' for Global RAG...")
+        rag_message: Optional[ChatMessage] = None
+        try:
+            rag_message = self._upload_service.process_directory_for_context(dir_path,
+                                                                             collection_id=constants.GLOBAL_COLLECTION_ID)
+        finally:
+            self._event_bus.hideLoader.emit()
 
-        # Call UploadService with GLOBAL_COLLECTION_ID
-        rag_message = self._upload_service.process_directory_for_context(dir_path,
-                                                                         collection_id=constants.GLOBAL_COLLECTION_ID)  # type: ignore
-
-        if rag_message and self._current_project_id and self._current_session_id:  # Add to current active chat
+        if rag_message and self._current_project_id and self._current_session_id:
             self._current_chat_history.append(rag_message)
             self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           rag_message)
-            self._log_llm_comm(f"RAG_SCAN_GLOBAL", rag_message.text)  # type: ignore
-            if rag_message.role == ERROR_ROLE:  # type: ignore
+            self._log_llm_comm(f"RAG_SCAN_GLOBAL", rag_message.text)
+            if rag_message.role == ERROR_ROLE:
                 self._emit_status_update(f"Global RAG Scan completed with errors.", "#FF6B6B", True, 5000)
             else:
                 self._emit_status_update(f"Global RAG Scan complete!", "#98c379", True, 3000)
         elif rag_message:
             logger.info(
-                f"Global RAG Scan completed. Message (not added to active chat): {rag_message.text}")  # type: ignore
-            # Status update for non-active chat context if needed
+                f"Global RAG Scan completed. Message (not added to active chat): {rag_message.text}")
         else:
             self._emit_status_update(f"Global RAG Scan failed or returned no message.", "#FF6B6B", True, 3000)
 
-        self._check_rag_readiness_and_emit_status()  # Re-check RAG status
+        self._check_rag_readiness_and_emit_status()
 
-    @Slot(list, str)  # NEW SLOT: For project-specific file uploads
+    @Slot(list, str)
     def handle_project_files_upload_request(self, file_paths: List[str], project_id: str):
         if not project_id:
             logger.error("CM: Project RAG file upload requested without a project_id.")
             self._emit_status_update("Cannot add files to project RAG: Project ID missing.", "#e06c75", True, 3000)
             return
 
-        if not self._upload_service or not self._upload_service.is_vector_db_ready(project_id):  # type: ignore
+        if not self._upload_service or not self._upload_service.is_vector_db_ready(project_id):
             self._emit_status_update(f"RAG system not ready for project '{project_id[:8]}...'. Cannot add files.",
                                      "#FF6B6B", True, 4000)
             return
 
         logger.info(f"CM: Requesting Project RAG file upload for {len(file_paths)} files, project: {project_id}")
-        self._emit_status_update(f"Adding {len(file_paths)} files to RAG for project '{project_id[:8]}...'...",
-                                 "#61afef", False)
+        self._event_bus.showLoader.emit(f"Adding {len(file_paths)} files to RAG for '{project_id[:8]}...'")
+        rag_message: Optional[ChatMessage] = None
+        try:
+            rag_message = self._upload_service.process_files_for_context(file_paths,
+                                                                         collection_id=project_id)
+        finally:
+            self._event_bus.hideLoader.emit()
 
-        # Call UploadService with the specific project_id as collection_id
-        rag_message = self._upload_service.process_files_for_context(file_paths,
-                                                                     collection_id=project_id)  # type: ignore
-
-        # Add confirmation/error message to the chat of the *active* project if it matches the target project
         if rag_message and self._current_project_id == project_id and self._current_session_id:
             self._current_chat_history.append(rag_message)
             self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           rag_message)
-            self._log_llm_comm(f"RAG_UPLOAD_P:{project_id[:6]}", rag_message.text)  # type: ignore
-            if rag_message.role == ERROR_ROLE:  # type: ignore
+            self._log_llm_comm(f"RAG_UPLOAD_P:{project_id[:6]}", rag_message.text)
+            if rag_message.role == ERROR_ROLE:
                 self._emit_status_update(f"Project RAG file add for '{project_id[:8]}' completed with errors.",
                                          "#FF6B6B", True, 5000)
             else:
                 self._emit_status_update(f"Project RAG file add for '{project_id[:8]}' complete!", "#98c379", True,
                                          3000)
-        elif rag_message:  # Files were added to a non-active project's RAG
+        elif rag_message:
             logger.info(
-                f"Project RAG file add for project '{project_id}' completed. Message (not added to active chat): {rag_message.text}")  # type: ignore
+                f"Project RAG file add for project '{project_id}' completed. Message (not added to active chat): {rag_message.text}")
             self._emit_status_update(f"Files added to RAG for (non-active) project '{project_id[:8]}'.", "#56b6c2",
                                      True, 4000)
         else:
             self._emit_status_update(f"Project RAG file add for '{project_id[:8]}' failed or returned no message.",
                                      "#FF6B6B", True, 3000)
 
-        self._check_rag_readiness_and_emit_status()  # Re-check RAG status
+        self._check_rag_readiness_and_emit_status()
 
     @Slot(str, str)
     def _handle_llm_request_sent(self, backend_id: str, request_id: str):
         if request_id == self._current_llm_request_id and backend_id == self._active_chat_backend_id:
             self._event_bus.uiInputBarBusyStateChanged.emit(True)
+            # Loader is already shown by the methods initiating the request
 
     @Slot(str, object, dict)
     def _handle_llm_response_completed(self, request_id: str, completed_message_obj: object, usage_stats_dict: dict):
@@ -602,21 +673,18 @@ Make the code production-ready and well-structured."""
         purpose = usage_stats_dict.get("purpose")
 
         if request_id == self._current_llm_request_id and meta_pid == self._current_project_id and meta_sid == self._current_session_id:
-            if isinstance(completed_message_obj, ChatMessage):  # type: ignore
+            self._event_bus.hideLoader.emit()  # Hide loader for this request
+            if isinstance(completed_message_obj, ChatMessage):
                 self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE",
-                                   completed_message_obj.text)  # type: ignore
+                                   completed_message_obj.text)
 
-                # Handle file creation requests
                 if purpose == "file_creation" and request_id in self._file_creation_request_ids:
                     filename = self._file_creation_request_ids.pop(request_id)
-                    extracted_code = self._extract_code_from_response(completed_message_obj.text)  # type: ignore
+                    extracted_code = self._extract_code_from_response(completed_message_obj.text)
 
                     if extracted_code:
                         logger.info(f"CM: Extracted code for file '{filename}', sending to code viewer")
-                        # Send the generated file to the code viewer
                         self._event_bus.modificationFileReadyForDisplay.emit(filename, extracted_code)
-
-                        # Add a system message to chat about the file creation
                         file_creation_msg = ChatMessage(
                             id=uuid.uuid4().hex,
                             role=SYSTEM_ROLE,
@@ -634,12 +702,12 @@ Make the code production-ready and well-structured."""
 
                 updated = False
                 for i, msg in enumerate(self._current_chat_history):
-                    if msg.id == request_id:  # type: ignore
-                        self._current_chat_history[i] = completed_message_obj  # type: ignore
-                        self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED  # type: ignore
+                    if msg.id == request_id:
+                        self._current_chat_history[i] = completed_message_obj
+                        self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
                         updated = True;
                         break
-                if not updated: self._current_chat_history.append(completed_message_obj)  # type: ignore
+                if not updated: self._current_chat_history.append(completed_message_obj)
                 if self._current_project_id and self._current_session_id:
                     self._event_bus.messageFinalizedForSession.emit(self._current_project_id, self._current_session_id,
                                                                     request_id, completed_message_obj, usage_stats_dict,
@@ -652,20 +720,19 @@ Make the code production-ready and well-structured."""
     @Slot(str, str)
     def _handle_llm_response_error(self, request_id: str, error_message_str: str):
         if request_id == self._current_llm_request_id:
+            self._event_bus.hideLoader.emit()  # Hide loader for this request
             self._log_llm_comm(f"{self._active_chat_backend_id.upper()} ERROR", error_message_str)
 
-            # Clean up file creation tracking if this was a file creation request
             if request_id in self._file_creation_request_ids:
                 filename = self._file_creation_request_ids.pop(request_id)
                 logger.warning(f"CM: File creation failed for '{filename}': {error_message_str}")
 
             err_chat_msg = ChatMessage(id=request_id, role=ERROR_ROLE, parts=[f"[AI Error: {error_message_str}]"],
-                                       # type: ignore
                                        loading_state=MessageLoadingState.ERROR)
             updated = False
             for i, msg in enumerate(self._current_chat_history):
                 if msg.id == request_id: self._current_chat_history[
-                    i] = err_chat_msg; updated = True; break  # type: ignore
+                    i] = err_chat_msg; updated = True; break
             if not updated: self._current_chat_history.append(err_chat_msg)
             if self._current_project_id and self._current_session_id:
                 self._event_bus.messageFinalizedForSession.emit(self._current_project_id, self._current_session_id,
@@ -685,7 +752,7 @@ Make the code production-ready and well-structured."""
     def _handle_specialized_llm_selection_event(self, backend_id: str, model_name: str):
         if self._active_specialized_backend_id != backend_id or self._active_specialized_model_name != model_name:
             self._active_specialized_backend_id, self._active_specialized_model_name = backend_id, model_name
-            self._configure_backend(backend_id, model_name, constants.CODER_AI_SYSTEM_PROMPT)  # type: ignore
+            self._configure_backend(backend_id, model_name, constants.CODER_AI_SYSTEM_PROMPT)
 
     @Slot(str, str)
     def _handle_personality_change_event(self, new_prompt: str, backend_id_for_persona: str):
@@ -695,29 +762,26 @@ Make the code production-ready and well-structured."""
                                     self._active_chat_personality_prompt)
 
     def _check_rag_readiness_and_emit_status(self):
-        # MODIFICATION: Fixed RAG readiness check with async embedder support
         if not self._upload_service or not hasattr(self._upload_service,
-                                                   '_vector_db_service') or not self._upload_service._vector_db_service:  # type: ignore
+                                                   '_vector_db_service') or not self._upload_service._vector_db_service:
             self._is_rag_ready = False
             self._event_bus.ragStatusChanged.emit(False, "RAG Not Ready (Service Error)", "#e06c75")
             return
 
         rag_status_message = "RAG Status: Initializing..."
-        rag_status_color = constants.TIMESTAMP_COLOR_HEX  # type: ignore
+        rag_status_color = constants.TIMESTAMP_COLOR_HEX
         current_context_rag_ready = False
 
-        # Check if embedder is ready
         if not self._upload_service._embedder_ready:
             rag_status_message = "RAG: Initializing embedder..."
             rag_status_color = "#e5c07b"
-        elif not self._current_project_id:  # No active project, check GLOBAL RAG
-            if not self._upload_service._dependencies_ready:  # type: ignore
+        elif not self._current_project_id:
+            if not self._upload_service._dependencies_ready:
                 rag_status_message = "Global RAG: Dependencies Missing"
                 rag_status_color = "#e06c75"
             else:
-                # Try to get collection size, which will create the collection if it doesn't exist
                 global_size = self._upload_service._vector_db_service.get_collection_size(
-                    constants.GLOBAL_COLLECTION_ID)  # type: ignore
+                    constants.GLOBAL_COLLECTION_ID)
                 if global_size == -1:
                     rag_status_message = "Global RAG: DB Error"
                     rag_status_color = "#e06c75"
@@ -729,18 +793,17 @@ Make the code production-ready and well-structured."""
                     rag_status_message = f"Global RAG: Ready ({global_size} chunks)"
                     rag_status_color = "#98c379"
                     current_context_rag_ready = True
-        else:  # Active project, check project-specific RAG
-            project_name_display = self._project_manager.get_project_by_id(self._current_project_id)  # type: ignore
+        else:
+            project_name_display = self._project_manager.get_project_by_id(self._current_project_id)
             project_display_name = project_name_display.name[:15] if project_name_display else self._current_project_id[
                                                                                                :8]
 
-            if not self._upload_service._dependencies_ready:  # type: ignore
+            if not self._upload_service._dependencies_ready:
                 rag_status_message = f"RAG for '{project_display_name}...': Dependencies Missing"
                 rag_status_color = "#e06c75"
             else:
-                # Try to get collection size, which will create the collection if it doesn't exist
                 project_size = self._upload_service._vector_db_service.get_collection_size(
-                    self._current_project_id)  # type: ignore
+                    self._current_project_id)
                 if project_size == -1:
                     rag_status_message = f"RAG for '{project_display_name}...': DB Error"
                     rag_status_color = "#e06c75"
@@ -753,11 +816,10 @@ Make the code production-ready and well-structured."""
                     rag_status_color = "#98c379"
                     current_context_rag_ready = True
 
-        self._is_rag_ready = current_context_rag_ready  # Update the general flag based on current context
+        self._is_rag_ready = current_context_rag_ready
         logger.info(f"CM: Emitting RAG Status: OverallReady={self._is_rag_ready}, Msg='{rag_status_message}'")
         self._event_bus.ragStatusChanged.emit(self._is_rag_ready, rag_status_message, rag_status_color)
 
-    # Rest of the methods remain the same...
     def set_model_for_backend(self, backend_id: str, model_name: str):
         if backend_id == self._active_chat_backend_id:
             if self._active_chat_model_name != model_name: self._handle_chat_llm_selection_event(backend_id, model_name)
@@ -769,7 +831,7 @@ Make the code production-ready and well-structured."""
         if 0.0 <= temperature <= 2.0: self._active_temperature = temperature; self._emit_status_update(
             f"Temp: {temperature:.2f}", "#61afef", True, 1500)
 
-    def get_current_chat_history(self) -> List[ChatMessage]:  # type: ignore
+    def get_current_chat_history(self) -> List[ChatMessage]:
         return self._current_chat_history
 
     def get_current_project_id(self) -> Optional[str]:
@@ -805,7 +867,7 @@ Make the code production-ready and well-structured."""
         return self._active_chat_personality_prompt
 
     def get_current_specialized_personality(self) -> Optional[str]:
-        return constants.CODER_AI_SYSTEM_PROMPT  # type: ignore
+        return constants.CODER_AI_SYSTEM_PROMPT
 
     def get_current_chat_temperature(self) -> float:
         return self._active_temperature
@@ -822,22 +884,23 @@ Make the code production-ready and well-structured."""
     def is_overall_busy(self) -> bool:
         return bool(self._current_llm_request_id) or self._backend_coordinator.is_any_backend_busy()
 
-    def get_llm_communication_logger(self) -> Optional[LlmCommunicationLogger]:  # type: ignore
+    def get_llm_communication_logger(self) -> Optional[LlmCommunicationLogger]:
         return self._llm_comm_logger
 
-    def get_backend_coordinator(self) -> BackendCoordinator:  # type: ignore
+    def get_backend_coordinator(self) -> BackendCoordinator:
         return self._backend_coordinator
 
-    def get_project_manager(self) -> ProjectManager:  # type: ignore
+    def get_project_manager(self) -> ProjectManager:
         return self._project_manager
 
-    def get_upload_service(self) -> UploadService:  # type: ignore
-        return self._upload_service  # type: ignore
+    def get_upload_service(self) -> UploadService:
+        return self._upload_service
 
-    def get_rag_handler(self) -> RagHandler:  # type: ignore
-        return self._rag_handler  # type: ignore
+    def get_rag_handler(self) -> RagHandler:
+        return self._rag_handler
 
     def cleanup_phase1(self):
         logger.info("ChatManager cleanup...")
         if self._current_llm_request_id: self._backend_coordinator.cancel_current_task(
             self._current_llm_request_id); self._current_llm_request_id = None
+        self._event_bus.hideLoader.emit()  # Ensure loader is hidden on cleanup
