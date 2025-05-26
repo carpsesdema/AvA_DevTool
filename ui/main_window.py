@@ -22,14 +22,15 @@ try:
     from ui.chat_input_bar import ChatInputBar
     from utils import constants
     from core.chat_message_state_handler import ChatMessageStateHandler
-    from services.project_service import Project, ChatSession # For type hint
+    from services.project_service import Project, ChatSession
 except ImportError as e_main_window:
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)  # Ensure logging is set up for early errors
     logging.critical(f"CRITICAL IMPORT ERROR in main_window.py: {e_main_window}", exc_info=True)
+    # Attempt to show a message box if QApplication can be instantiated
     try:
         _dummy_app = QApplication(sys.argv) if QApplication.instance() is None else QApplication.instance()
         QMessageBox.critical(None, "Import Error",
-                             f"Failed to import critical UI components:\n{e_main_window}\nCheck installation and paths.")
+                             f"Failed to import critical UI components:\n{e_main_window}\nCheck logs and installation.")
     except Exception as msg_e:
         logging.critical(f"Failed to show import error message box: {msg_e}")
     sys.exit(1)
@@ -46,26 +47,28 @@ class MainWindow(QWidget):
             raise TypeError("MainWindow requires a valid ChatManager instance.")
 
         self.chat_manager = chat_manager
-        self._project_manager = chat_manager.get_project_manager()
-        self.app_base_path = app_base_path
+        self._project_manager = chat_manager.get_project_manager()  # Assuming ChatManager provides this
+        self.app_base_path = app_base_path  # For fallback paths if needed
         self._event_bus = EventBus.get_instance()
 
         self.left_panel: Optional[LeftControlPanel] = None
         self.status_label: Optional[QLabel] = None
         self._status_clear_timer: Optional[QTimer] = None
-        self.dialog_service: Optional[DialogService] = None
+        self.dialog_service: Optional[DialogService] = None  # DialogService is owned by MainWindow
         self.active_chat_display_area: Optional[ChatDisplayArea] = None
         self.active_chat_input_bar: Optional[ChatInputBar] = None
         self._chat_message_state_handler: Optional[ChatMessageStateHandler] = None
 
         self._current_base_status_text: str = "Status: Initializing..."
-        self._current_base_status_color: str = "#abb2bf"
+        self._current_base_status_color: str = "#abb2bf"  # Default color
 
         try:
+            # DialogService is instantiated here, owned by MainWindow
             self.dialog_service = DialogService(self, self.chat_manager, self._event_bus)
         except Exception as e_ds:
             logger.critical(f"Failed to initialize DialogService in MainWindow: {e_ds}", exc_info=True)
-            QApplication.quit()
+            # This is critical, consider how to handle app exit if DialogService fails
+            QApplication.quit()  # Or raise the error
             return
 
         self._init_ui()
@@ -78,20 +81,33 @@ class MainWindow(QWidget):
     def _setup_window_properties(self):
         self.setWindowTitle(constants.APP_NAME)
         try:
-            app_icon_path = os.path.join(constants.ASSETS_PATH, constants.APP_ICON_FILENAME if hasattr(constants,
-                                                                                                       'APP_ICON_FILENAME') else "Synchat.ico")
-            if os.path.exists(app_icon_path):
+            # Robust icon path finding
+            icon_filename = getattr(constants, 'APP_ICON_FILENAME', "Synchat.ico")  # Default if constant missing
+            icon_path_candidates = [
+                os.path.join(constants.ASSETS_PATH, icon_filename),
+                os.path.join(os.path.dirname(sys.executable), icon_filename) if getattr(sys, 'frozen', False) else "",
+                # For bundled app
+                os.path.join(self.app_base_path, "assets", icon_filename)  # Relative to app_base_path
+            ]
+            app_icon_path = ""
+            for p in icon_path_candidates:
+                if p and os.path.exists(p):
+                    app_icon_path = p
+                    break
+
+            if app_icon_path:
                 self.setWindowIcon(QIcon(app_icon_path))
+                logger.info(f"Application icon set from: {app_icon_path}")
             else:
-                logger.warning(f"Application icon not found at: {app_icon_path}.")
+                logger.warning(f"Application icon not found. Candidates: {icon_path_candidates}")
                 std_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-                if not std_icon.isNull():
-                    self.setWindowIcon(std_icon)
+                if not std_icon.isNull(): self.setWindowIcon(std_icon)
         except Exception as e_icon:
             logger.error(f"Error setting window icon: {e_icon}", exc_info=True)
         self.update_window_title()
 
     def _init_ui(self):
+        # ... (UI initialization remains largely the same) ...
         main_hbox_layout = QHBoxLayout(self)
         main_hbox_layout.setContentsMargins(0, 0, 0, 0)
         main_hbox_layout.setSpacing(0)
@@ -102,8 +118,8 @@ class MainWindow(QWidget):
         try:
             self.left_panel = LeftControlPanel(chat_manager=self.chat_manager, parent=self)
             self.left_panel.setObjectName("LeftPanel")
-            self.left_panel.setMinimumWidth(260)
-            self.left_panel.setMaximumWidth(400)
+            self.left_panel.setMinimumWidth(260)  # Adjusted min width
+            self.left_panel.setMaximumWidth(400)  # Adjusted max width
         except Exception as e_lcp:
             logger.critical(f"CRITICAL ERROR creating LeftControlPanel: {e_lcp}", exc_info=True)
             QMessageBox.critical(self, "Initialization Error", f"Failed to create Left Panel:\n{e_lcp}")
@@ -113,41 +129,44 @@ class MainWindow(QWidget):
         right_panel_widget = QWidget(self)
         right_panel_widget.setObjectName("RightPanelContainer")
         right_panel_layout = QVBoxLayout(right_panel_widget)
-        right_panel_layout.setContentsMargins(5, 5, 5, 5)
-        right_panel_layout.setSpacing(5)
-        right_panel_widget.setMinimumWidth(450)
+        right_panel_layout.setContentsMargins(5, 5, 5, 5)  # Standard margins
+        right_panel_layout.setSpacing(5)  # Standard spacing
+        right_panel_widget.setMinimumWidth(450)  # Ensure right panel has enough space
 
         self.active_chat_display_area = ChatDisplayArea(parent=right_panel_widget)
+        # Ensure delegate has its view set, if applicable
         if self.active_chat_display_area and self.active_chat_display_area.chat_item_delegate:
             self.active_chat_display_area.chat_item_delegate.setView(self.active_chat_display_area.chat_list_view)
 
         self.active_chat_input_bar = ChatInputBar(parent=right_panel_widget)
 
-        right_panel_layout.addWidget(self.active_chat_display_area, 1)
+        right_panel_layout.addWidget(self.active_chat_display_area, 1)  # Display area takes most space
         right_panel_layout.addWidget(self.active_chat_input_bar)
 
-        status_bar_widget = QWidget(self)
+        status_bar_widget = QWidget(self)  # No parent needed if added to layout
         status_bar_widget.setObjectName("StatusBarWidget")
         status_bar_layout = QHBoxLayout(status_bar_widget)
         status_bar_layout.setContentsMargins(8, 3, 8, 3)
         status_bar_layout.setSpacing(10)
-        self.status_label = QLabel("Status: Initializing...", self)
+        self.status_label = QLabel("Status: Initializing...", self)  # Parent self is fine
         self.status_label.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 2))
         self.status_label.setObjectName("StatusLabel")
-        status_bar_layout.addWidget(self.status_label, 1)
+        status_bar_layout.addWidget(self.status_label, 1)  # Stretch factor
         right_panel_layout.addWidget(status_bar_widget)
 
         main_splitter.addWidget(self.left_panel)
         main_splitter.addWidget(right_panel_widget)
-        main_splitter.setSizes([270, 730])
-        main_splitter.setStretchFactor(0, 0)
-        main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([270, 730])  # Initial sizes, user can adjust
+        main_splitter.setStretchFactor(0, 0)  # Left panel doesn't stretch as much
+        main_splitter.setStretchFactor(1, 1)  # Right panel stretches
         main_hbox_layout.addWidget(main_splitter)
-        self.setLayout(main_hbox_layout)
+        self.setLayout(main_hbox_layout)  # Set main layout for MainWindow
 
+        # Initialize ChatMessageStateHandler, which listens to EventBus for LLM state changes
         self._chat_message_state_handler = ChatMessageStateHandler(self._event_bus, parent=self)
 
     def _apply_styles(self):
+        # ... (remains the same) ...
         logger.debug("MainWindow applying styles...")
         try:
             stylesheet_path = ""
@@ -168,6 +187,7 @@ class MainWindow(QWidget):
             self.setStyleSheet("QWidget { background-color: #333; color: #EEE; }")
 
     def _connect_signals_and_event_bus(self):
+        # ... (remains the same) ...
         if not all([self.chat_manager, self.left_panel, self.dialog_service,
                     self.active_chat_display_area, self.active_chat_input_bar]):
             logger.error("MainWindow: One or more critical UI components are None. Cannot connect signals.")
@@ -192,6 +212,8 @@ class MainWindow(QWidget):
         bus.uiErrorGlobal.connect(self._handle_error_event)
         bus.uiInputBarBusyStateChanged.connect(self._handle_input_bar_busy_state_change)
         bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event)
+
+        # MainWindow handles showing the code viewer when this signal is emitted
         bus.modificationFileReadyForDisplay.connect(self._handle_code_file_update_event)
 
         bus.newMessageAddedToHistory.connect(self._handle_new_message_added_to_history)
@@ -204,6 +226,7 @@ class MainWindow(QWidget):
         shortcut_escape.activated.connect(self._handle_escape_key_pressed)
 
     def _connect_project_manager_signals_to_ui(self):
+        # ... (remains the same) ...
         if not self._project_manager:
             logger.warning("MW: ProjectManager not available for signal connection.")
             return
@@ -211,42 +234,48 @@ class MainWindow(QWidget):
         logger.debug("MW: Connecting ProjectManager signals for MainWindow specific UI updates.")
         self._project_manager.projectSwitched.connect(self._handle_project_switched_ui_update)
         self._project_manager.sessionSwitched.connect(self._handle_session_switched_ui_update)
-        self._project_manager.projectDeleted.connect(self.update_window_title) # Also update title if project is deleted
+        self._project_manager.projectDeleted.connect(self.update_window_title)
 
     @Slot(str, str)
     def _handle_code_file_update_event(self, filename: str, content: str):
-        logger.info(f"MainWindow: Received code update for '{filename}' via EventBus.")
+        """Handles the event when a file is ready to be displayed in the code viewer."""
+        logger.info(f"MainWindow: Received code update for '{filename}' via EventBus. Delegating to DialogService.")
         if self.dialog_service:
-            # FIXED: Use dialog service to show code viewer properly
-            code_viewer = self.dialog_service.show_code_viewer(ensure_creation=True)
-            if code_viewer:
-                project_id = self.chat_manager.get_current_project_id() if self.chat_manager else "unknown_project"
-                focus_prefix = self._project_manager.get_project_files_dir(
-                    project_id) if self._project_manager and project_id != "unknown_project" else self.app_base_path
+            project_id_context = self.chat_manager.get_current_project_id() if self.chat_manager else None
 
-                # FIXED: Better file handling with proper focus prefix
-                try:
-                    code_viewer.update_or_add_file(
-                        filename, content, is_ai_modification=True, original_content=None,
-                        project_id_for_apply=project_id, focus_prefix_for_apply=focus_prefix
-                    )
-                    logger.info(
-                        f"MainWindow: Successfully added/updated '{filename}' in CodeViewer for project '{project_id}'")
+            # Determine the base directory for "Apply" functionality
+            # This should ideally be the root of the current Ava project's generated files
+            focus_prefix_context = None
+            if self._project_manager and project_id_context:
+                focus_prefix_context = self._project_manager.get_project_files_dir(project_id_context)
+            else:  # Fallback if no project context
+                focus_prefix_context = os.path.join(os.getcwd(), "ava_generated_projects", "unknown_project")
+                os.makedirs(focus_prefix_context, exist_ok=True)
 
-                    # Ensure the code viewer is visible and focused
-                    code_viewer.show()
-                    code_viewer.activateWindow()
-                    code_viewer.raise_()
-
-                except Exception as e_update:
-                    logger.error(f"MainWindow: Error updating code viewer with file '{filename}': {e_update}")
-                    self.update_status(f"Error displaying {filename} in code viewer", "#e06c75", True, 5000)
+            success = self.dialog_service.display_file_in_code_viewer(
+                filename,
+                content,
+                project_id=project_id_context,
+                focus_prefix=focus_prefix_context
+            )
+            if success:
+                logger.info(f"MainWindow: Successfully requested DialogService to display '{filename}'.")
             else:
-                logger.error("MainWindow: CodeViewerDialog instance could not be obtained/created.")
-                self.update_status("Could not open code viewer", "#e06c75", True, 3000)
+                logger.error(f"MainWindow: DialogService failed to display '{filename}'.")
+                self.update_status(f"Error displaying {filename} in code viewer", "#e06c75", True, 5000)
         else:
-            logger.error("MainWindow: DialogService not available to show CodeViewer.")
-            self.update_status("Dialog service not available", "#e06c75", True, 3000)
+            logger.error("MainWindow: DialogService not available to handle code file update.")
+            self.update_status("Dialog service for code viewer not available", "#e06c75", True, 3000)
+
+    # ... (rest of the methods: _handle_project_switched_ui_update, _handle_session_switched_ui_update,
+    #      _handle_new_message_added_to_history, _handle_active_session_cleared,
+    #      _handle_active_session_history_loaded, _handle_message_chunk_for_session,
+    #      _handle_message_finalized_for_session, update_status, _refresh_full_status_display,
+    #      _clear_temporary_status, _handle_error_event, _handle_input_bar_busy_state_change,
+    #      _handle_backend_configuration_changed_event, _handle_escape_key_pressed,
+    #      update_window_title, closeEvent, showEvent)
+    # ... should remain largely the same as the last correct version you have for those ...
+
     @Slot(str)
     def _handle_project_switched_ui_update(self, project_id: str):
         logger.info(f"MW: UI Update for project switched (from PM signal): {project_id}")
@@ -259,8 +288,9 @@ class MainWindow(QWidget):
 
     @Slot(str, str, ChatMessage)
     def _handle_new_message_added_to_history(self, project_id: str, session_id: str, message: ChatMessage):
-        current_pid = self.chat_manager.get_current_project_id()
-        current_sid = self.chat_manager.get_current_session_id()
+        current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
+        current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
+
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
             self.active_chat_display_area.add_message_to_model(project_id, session_id, message)
         else:
@@ -269,8 +299,9 @@ class MainWindow(QWidget):
 
     @Slot(str, str)
     def _handle_active_session_cleared(self, project_id: str, session_id: str):
-        current_pid = self.chat_manager.get_current_project_id()
-        current_sid = self.chat_manager.get_current_session_id()
+        current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
+        current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
+
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
             logger.info(f"MW: Clearing display for active session P:{project_id}/S:{session_id}")
             self.active_chat_display_area.clear_model_display(project_id, session_id)
@@ -280,37 +311,38 @@ class MainWindow(QWidget):
 
     @Slot(str, str, list)
     def _handle_active_session_history_loaded(self, project_id: str, session_id: str, history: List[ChatMessage]):
-        current_pid = self.chat_manager.get_current_project_id()
-        current_sid = self.chat_manager.get_current_session_id()
+        current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
+        current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
 
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
             logger.info(f"MW: Loading history for active session P:{project_id}/S:{session_id} into display area.")
-            self.active_chat_display_area.set_current_context(project_id, session_id)
+            self.active_chat_display_area.set_current_context(project_id, session_id)  # Ensure context is set
             self.active_chat_display_area.load_history_into_model(project_id, session_id, history)
 
             if self._chat_message_state_handler and self.active_chat_display_area.get_model():
                 logger.info(f"MW: Registering model for P:{project_id}/S:{session_id} with ChatMessageStateHandler.")
                 self._chat_message_state_handler.register_model_for_project_session(
-                    project_id, session_id, self.active_chat_display_area.get_model()
+                    project_id, session_id, self.active_chat_display_area.get_model()  # type: ignore
                 )
             else:
-                logger.warning(f"MW: Could not register model for P:{project_id}/S:{session_id}. CMSH or model missing.")
+                logger.warning(
+                    f"MW: Could not register model for P:{project_id}/S:{session_id}. CMSH or model missing.")
         else:
             logger.debug(
                 f"MW: activeSessionHistoryLoaded for P/S ({project_id}/{session_id}) which is not current active ({current_pid}/{current_sid}). Ignored by active display.")
 
     @Slot(str, str, str, str)
     def _handle_message_chunk_for_session(self, project_id: str, session_id: str, request_id: str, chunk_text: str):
-        current_pid = self.chat_manager.get_current_project_id()
-        current_sid = self.chat_manager.get_current_session_id()
+        current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
+        current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
             self.active_chat_display_area.append_chunk_to_message_by_id(request_id, chunk_text)
 
     @Slot(str, str, str, ChatMessage, dict, bool)
     def _handle_message_finalized_for_session(self, project_id: str, session_id: str, request_id: str,
                                               final_message_obj: ChatMessage, usage_stats_dict: dict, is_error: bool):
-        current_pid = self.chat_manager.get_current_project_id()
-        current_sid = self.chat_manager.get_current_session_id()
+        current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
+        current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
             self.active_chat_display_area.finalize_message_by_id(request_id, final_message_obj, is_error)
 
@@ -323,7 +355,7 @@ class MainWindow(QWidget):
 
         if self._status_clear_timer:
             self._status_clear_timer.stop()
-            self._status_clear_timer.deleteLater()
+            # self._status_clear_timer.deleteLater() # deleteLater can be problematic if timer is immediately restarted
             self._status_clear_timer = None
 
         if is_temporary:
@@ -339,21 +371,23 @@ class MainWindow(QWidget):
         self.status_label.setStyleSheet(f"QLabel#StatusLabel {{ color: {self._current_base_status_color}; }}")
 
     def _clear_temporary_status(self):
-        if self._status_clear_timer:
+        if self._status_clear_timer:  # Check if it still exists (might have been deleted)
             self._status_clear_timer.stop()
-            self._status_clear_timer.deleteLater()
+            # self._status_clear_timer.deleteLater() # Avoid if re-entrant or quick succession of status updates
             self._status_clear_timer = None
 
-        if self.chat_manager and self.chat_manager.is_api_ready():
-            self.update_status(
-                f"Ready. Using {self.chat_manager.get_model_for_backend(self.chat_manager.get_current_active_chat_backend_id())}",
-                "#98c379", is_temporary=False)
-        elif self.chat_manager:
-            last_error = self.chat_manager._backend_coordinator.get_last_error_for_backend(
-                self.chat_manager.get_current_active_chat_backend_id()) if self.chat_manager._backend_coordinator else "Unknown"
-            self.update_status(
-                f"Backend not configured: {last_error}", "#FFCC00", is_temporary=False)
-        else:
+        if self.chat_manager:
+            if self.chat_manager.is_api_ready():
+                model_name = self.chat_manager.get_model_for_backend(
+                    self.chat_manager.get_current_active_chat_backend_id()) or "Unknown Model"
+                self.update_status(f"Ready. Using {model_name}", "#98c379", is_temporary=False)
+            else:
+                last_error = "Unknown configuration error"
+                if self.chat_manager._backend_coordinator:  # type: ignore
+                    last_error = self.chat_manager._backend_coordinator.get_last_error_for_backend(  # type: ignore
+                        self.chat_manager.get_current_active_chat_backend_id()) or "Backend config issue"
+                self.update_status(f"Backend not configured: {last_error}", "#FFCC00", is_temporary=False)
+        else:  # Fallback if chat_manager is None
             self.update_status("Ready", "#98c379", is_temporary=False)
 
     @Slot(str, bool)
@@ -366,13 +400,12 @@ class MainWindow(QWidget):
     def _handle_input_bar_busy_state_change(self, is_input_bar_busy: bool):
         if self.active_chat_input_bar:
             self.active_chat_input_bar.handle_busy_state(is_input_bar_busy)
-        if self.left_panel:
-            api_ready = self.chat_manager.is_api_ready() if self.chat_manager else False
-            rag_ready = self.chat_manager.is_rag_ready() if self.chat_manager else False
-            # FIX: Use correct parameter names for set_enabled_state
+        if self.left_panel and self.chat_manager:
+            api_ready = self.chat_manager.is_api_ready()
+            rag_ready = self.chat_manager.is_rag_ready()
             self.left_panel.set_enabled_state(
                 is_api_ready=api_ready,
-                is_busy=is_input_bar_busy,
+                is_busy=is_input_bar_busy,  # Use the direct busy state from input bar
                 is_rag_ready=rag_ready
             )
 
@@ -385,23 +418,42 @@ class MainWindow(QWidget):
                 active=bool(self.chat_manager.get_current_chat_personality()))
 
         if is_configured:
-            logger.info(f"MW: Backend '{backend_id}' configured. Status updated via ChatManager.")
+            logger.info(
+                f"MW: Backend '{backend_id}' configured for model '{model_name}'. Status updated by ChatManager.")
         else:
-            logger.warning(f"MW: Backend '{backend_id}' not configured. Status updated via ChatManager.")
+            logger.warning(
+                f"MW: Backend '{backend_id}' not configured for model '{model_name}'. Status updated by ChatManager.")
+
+        # Explicitly update status based on active chat backend config
+        if self.chat_manager and backend_id == self.chat_manager.get_current_active_chat_backend_id():
+            if is_configured:
+                self.update_status(f"Ready. Using {model_name}", "#98c379", False)
+            else:
+                err = "Unknown reason"
+                if self.chat_manager._backend_coordinator:  # type: ignore
+                    err = self.chat_manager._backend_coordinator.get_last_error_for_backend(
+                        backend_id) or "Config error"  # type: ignore
+                self.update_status(f"Chat LLM Error: {err}", "#FF6B6B", False)
 
     def _handle_escape_key_pressed(self):
         if self.chat_manager and self.chat_manager.is_overall_busy():
-            if hasattr(self.chat_manager, '_current_llm_request_id') and self.chat_manager._current_llm_request_id:
-                request_to_cancel = self.chat_manager._current_llm_request_id
-                if self.chat_manager._backend_coordinator:
-                    self.chat_manager._backend_coordinator.cancel_current_task(request_id=request_to_cancel)
+            if hasattr(self.chat_manager,
+                       '_current_llm_request_id') and self.chat_manager._current_llm_request_id:  # type: ignore
+                request_to_cancel = self.chat_manager._current_llm_request_id  # type: ignore
+                if self.chat_manager._backend_coordinator:  # type: ignore
+                    self.chat_manager._backend_coordinator.cancel_current_task(
+                        request_id=request_to_cancel)  # type: ignore
                     self.update_status("Attempting to cancel AI response...", "#e5c07b", True, 2000)
+            else:  # Generic busy state, try cancelling all for the coordinator
+                if self.chat_manager._backend_coordinator and self.chat_manager._backend_coordinator.is_any_backend_busy():  # type: ignore
+                    self.chat_manager._backend_coordinator.cancel_current_task(None)  # type: ignore # Cancel all
+                    self.update_status("Attempting to cancel ongoing AI tasks...", "#e5c07b", True, 2000)
 
     def update_window_title(self):
         base_title = constants.APP_NAME
         details = []
-        current_project: Optional[Project] = None
-        current_session: Optional[ChatSession] = None
+        current_project: Optional[Project] = None  # type: ignore
+        current_session: Optional[ChatSession] = None  # type: ignore
 
         if self._project_manager:
             current_project = self._project_manager.get_current_project()
@@ -416,13 +468,14 @@ class MainWindow(QWidget):
             active_backend_id = self.chat_manager.get_current_active_chat_backend_id()
             model_name = self.chat_manager.get_model_for_backend(active_backend_id)
             if model_name:
-                model_short = model_name.split('/')[-1].split(':')[-1].replace("-latest", "").replace("-preview-05-20","")
-                details.append(f"LLM: {model_short[:20]}") # Shorten model name if too long
+                model_short = model_name.split('/')[-1].split(':')[-1]  # Basic shortening
+                if "gemini" in model_short: model_short = model_short.replace("-preview-05-20", "").replace("-latest",
+                                                                                                            "")
+                details.append(f"LLM: {model_short[:20]}")
             if self.chat_manager.get_current_chat_personality():
                 details.append("Persona")
 
         self.setWindowTitle(f"{base_title} - [{', '.join(details)}]" if details else base_title)
-
 
     def closeEvent(self, event: QCloseEvent):
         logger.info("MainWindow closeEvent triggered. Performing cleanup...")
@@ -431,6 +484,7 @@ class MainWindow(QWidget):
         if self.chat_manager and hasattr(self.chat_manager, 'cleanup_phase1'):
             self.chat_manager.cleanup_phase1()
 
+        # Unregister model from ChatMessageStateHandler if conditions are met
         if self._chat_message_state_handler and self.chat_manager:
             pid = self.chat_manager.get_current_project_id()
             sid = self.chat_manager.get_current_session_id()
@@ -441,6 +495,6 @@ class MainWindow(QWidget):
     def showEvent(self, event: QEvent):
         super().showEvent(event)
         if self.active_chat_input_bar:
-            QTimer.singleShot(100, self.active_chat_input_bar.set_focus)
-        QTimer.singleShot(150, self._clear_temporary_status)
+            QTimer.singleShot(100, self.active_chat_input_bar.set_focus)  # type: ignore
+        QTimer.singleShot(150, self._clear_temporary_status)  # Initial status clear after show
         self.update_window_title()
