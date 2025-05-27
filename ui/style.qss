@@ -112,8 +112,7 @@ QComboBox {
     color: #C9D1D9;
     border: 1px solid #30363D;
     border-radius: 4px;
-    padding: 5px;
-    min-height: 20px;
+    padding: 2px 4px 2px 4px; /* Minimal padding */
 }
 
 QComboBox:hover {
@@ -123,14 +122,20 @@ QComboBox:hover {
 QComboBox::drop-down {
     subcontrol-origin: padding;
     subcontrol-position: top right;
-    width: 20px;
-    border-left: 1px solid #30363D;
+    /* width removed to let Qt decide based on arrow size + some padding */
+    border-left-width: 1px;
+    border-left-color: #30363D;
+    border-left-style: solid;
+    border-top-right-radius: 3px;
+    border-bottom-right-radius: 3px;
+    padding-right: 2px; /* Minimal padding for the dropdown button itself */
 }
 
 QComboBox::down-arrow {
-    image: url(assets/down_arrow_green.png);
-    width: 10px;
-    height: 10px;
+    image: url(../assets/down_arrow_green.svg);
+    width: 12px;
+    height: 12px;
+    /* No explicit padding here, ensure SVG is designed well */
 }
 
 QComboBox QAbstractItemView {

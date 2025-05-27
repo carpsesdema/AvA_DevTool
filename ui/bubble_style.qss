@@ -1,134 +1,106 @@
-/****************************************************************************
- * bubble_style.qss - Styles for content within chat bubbles (Markdown, etc.)
- ****************************************************************************/
-
-/* General body/paragraph styling within the bubble's QTextDocument */
 body {
-    /* The ChatItemDelegate sets the base text color dynamically */
-    /* font-family is inherited from the QTextEdit/QListView */
     line-height: 140%;
 }
 
 p {
     margin-top: 0px;
-    margin-bottom: 8px; /* Space after paragraphs */
+    margin-bottom: 8px;
     padding: 0;
 }
 
 p:last-child {
-    margin-bottom: 0px; /* No extra space after the very last paragraph */
+    margin-bottom: 0px;
 }
 
-/* Headings */
 h1, h2, h3, h4, h5, h6 {
     margin-top: 10px;
     margin-bottom: 5px;
     font-weight: bold;
     line-height: 120%;
+    color: #39D353; /* THEME_TEXT_ACCENT_GREEN */
 }
-h1 { font-size: 1.5em; color: #61afef; } /* Blueish */
-h2 { font-size: 1.3em; color: #c678dd; } /* Purplish */
-h3 { font-size: 1.15em; color: #98c379; } /* Greenish */
-h4 { font-size: 1.0em; font-weight: bold; } /* Default color, bold */
+h1 { font-size: 1.5em; }
+h2 { font-size: 1.3em; }
+h3 { font-size: 1.15em; }
+h4 { font-size: 1.0em; }
 
-/* Lists */
 ul, ol {
     margin-top: 4px;
     margin-bottom: 8px;
-    margin-left: 20px; /* Indentation for lists */
+    margin-left: 20px;
     padding: 0;
 }
 
 li {
-    margin-bottom: 4px; /* Space between list items */
+    margin-bottom: 4px;
 }
 
-/* Blockquotes */
 blockquote {
-    border-left: 3px solid #4f5356; /* Greyish border */
+    border-left: 3px solid #30363D; /* THEME_BORDER_COLOR */
     padding-left: 10px;
-    margin-left: 0px; /* QTextDocument might add its own, adjust as needed */
+    margin-left: 0px;
     margin-top: 8px;
     margin-bottom: 8px;
-    color: #828c9a; /* Dimmer text for quotes */
+    color: #8B949E; /* THEME_TEXT_SECONDARY */
     font-style: italic;
 }
 
-/* Code Blocks (pre) and Inline Code (code) */
-/* These styles are critical for readability */
-
 pre {
-    background-color: #21252b; /* Slightly different dark for code blocks */
-    border: 1px solid #3a3f4b;
+    background-color: #010409; /* CODE_BLOCK_BG_COLOR_HEX */
+    border: 1px solid #30363D; /* THEME_BORDER_COLOR */
     border-radius: 4px;
     padding: 10px;
     margin-top: 6px;
     margin-bottom: 8px;
-    overflow-x: auto; /* Allow horizontal scrolling for long lines */
-    white-space: pre-wrap; /* Wrap lines that are too long but preserve spaces */
-    word-wrap: break-word; /* Break long words if necessary */
-    font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
-    font-size: 9pt; /* Slightly smaller for code */
-    color: #abb2bf; /* Default code text color */
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: "Consolas", "Courier New", monospace; /* Matching CHAT_FONT_FAMILY if it's monospaced */
+    font-size: 10pt; /* Slightly smaller than main chat text if CHAT_FONT_SIZE is 11pt */
+    color: #C9D1D9; /* THEME_TEXT_PRIMARY */
     line-height: 135%;
 }
 
-/* Inline code */
 code {
-    background-color: #3e4451; /* Background for inline code */
+    background-color: #21262D; /* THEME_BACKGROUND_LIGHT or a bit darker */
     border-radius: 3px;
-    padding: 2px 4px;
-    font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
-    font-size: 0.9em; /* Slightly smaller than surrounding text */
-    color: #dcdcdc; /* Lighter text for inline code */
+    padding: 1px 4px;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 0.9em;
+    color: #C9D1D9; /* THEME_TEXT_PRIMARY */
 }
 
-/* Horizontal Rule */
 hr {
     border: 0;
-    border-top: 1px solid #3e4451;
+    border-top: 1px solid #30363D; /* THEME_BORDER_COLOR */
     margin: 12px 0;
 }
 
-/* Tables (Basic Styling) */
 table {
     border-collapse: collapse;
     margin-top: 8px;
     margin-bottom: 10px;
-    width: auto; /* Or 100% if you want full width tables */
+    width: auto;
     font-size: 0.95em;
 }
 
 th, td {
-    border: 1px solid #4f5356;
+    border: 1px solid #30363D; /* THEME_BORDER_COLOR */
     padding: 6px 8px;
     text-align: left;
 }
 
 th {
-    background-color: #3e4451; /* Header row background */
+    background-color: #21262D; /* THEME_BACKGROUND_LIGHT */
     font-weight: bold;
-    color: #dcdcdc;
+    color: #39D353; /* THEME_TEXT_ACCENT_GREEN for table headers */
 }
 
-/* Links */
 a {
-    color: #61afef; /* Blue for links */
-    text-decoration: none; /* No underline by default */
+    color: #58A6FF; /* A common link blue that works well in dark themes, or use your THEME_ACCENT_GREEN */
+    text-decoration: none;
 }
 
 a:hover {
-    text-decoration: underline; /* Underline on hover */
+    text-decoration: underline;
 }
-
-/* Images (QTextDocument doesn't directly render external images via CSS like this,
-   but ChatItemDelegate handles QPixmap rendering. This is more for if Markdown
-   somehow produced an <img> tag that Qt could interpret, which is unlikely here.)
-img {
-    max-width: 100%;
-    height: auto;
-    border-radius: 4px;
-    margin-top: 5px;
-    margin-bottom: 5px;
-}
-*/
