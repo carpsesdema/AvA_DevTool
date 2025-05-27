@@ -1,86 +1,24 @@
 # utils/constants.py
+import logging
 import os
-from pathlib import Path
+import sys
 
-# Application Information
-APPLICATION_NAME = "AvA DevTool"
-APPLICATION_VERSION = "1.0.0"
+logger = logging.getLogger(__name__)
 
-# LLM Backend Configuration - UPDATED FOR DEVSTRAL OPTIMIZATION
+APP_NAME = "AvA: PySide6 Rebuild"
+APP_VERSION = "1.0.5"
+
+# --- LLM Configuration ---
+# AVA_ASSISTANT_MODIFIED: Changed DEFAULT_CHAT_BACKEND_ID to be a consistent adapter key
 DEFAULT_CHAT_BACKEND_ID = "gemini_chat_default"
-DEFAULT_GEMINI_CHAT_MODEL = "gemini-1.5-flash"
-DEFAULT_QWEN_CHAT_MODEL = "qwen2.5-coder:14b"
-DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:14b"
+DEFAULT_GEMINI_CHAT_MODEL = "models/gemini-2.5-flash-preview-05-20"  # The actual model for the gemini_chat_default adapter
+DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:14b"  # OPTIMIZED: Better coding model for chat
+# DEFAULT_GPT_CHAT_MODEL = "gpt-3.5-turbo" # Example if you add a GPT default
 
-# OPTIMIZED: Switch to Devstral for specialized tasks
-GENERATOR_BACKEND_ID = "ollama_specialized"
-DEFAULT_OLLAMA_GENERATOR_MODEL = "devstral:latest"
+GENERATOR_BACKEND_ID = "ollama_generator_default"  # This is an adapter key
+DEFAULT_OLLAMA_GENERATOR_MODEL = "devstral:latest"  # OPTIMIZED: Devstral is much better than CodeLlama
 
-# UI Configuration
-MAIN_WINDOW_DEFAULT_WIDTH = 1200
-MAIN_WINDOW_DEFAULT_HEIGHT = 800
-MAIN_WINDOW_MIN_WIDTH = 800
-MAIN_WINDOW_MIN_HEIGHT = 600
-
-# Colors
-BACKGROUND_COLOR_HEX = "#1e1e1e"
-CHAT_BUBBLE_USER_COLOR_HEX = "#2c3e50"
-CHAT_BUBBLE_AI_COLOR_HEX = "#34495e"
-CHAT_BUBBLE_SYSTEM_COLOR_HEX = "#27ae60"
-CHAT_BUBBLE_ERROR_COLOR_HEX = "#e74c3c"
-TEXT_COLOR_HEX = "#ecf0f1"
-TIMESTAMP_COLOR_HEX = "#95a5a6"
-STATUS_BAR_BACKGROUND_COLOR_HEX = "#2c3e50"
-
-# Fonts and Sizing
-FONT_FAMILY_MAIN = "Segoe UI"
-FONT_SIZE_MAIN = 11
-FONT_SIZE_CODE = 10
-FONT_FAMILY_CODE = "Consolas"
-CHAT_BUBBLE_BORDER_RADIUS = 10
-CHAT_BUBBLE_PADDING = 12
-
-# File Paths
-USER_DATA_DIR = Path.home() / ".ava_devtool"
-ASSETS_DIR = Path(__file__).parent.parent / "assets"
-STYLESHEETS_DIR = ASSETS_DIR / "stylesheets"
-
-# RAG Configuration
-RAG_CHUNK_SIZE = 1000
-RAG_CHUNK_OVERLAP = 200
-RAG_MAX_FILE_SIZE_MB = 10
-RAG_IGNORED_DIRECTORIES = {".git", "__pycache__", ".vscode", "node_modules", ".idea", "venv", "env"}
-RAG_ALLOWED_EXTENSIONS = {".py", ".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini"}
-
-# Collections
-GLOBAL_COLLECTION_ID = "global_knowledge"
-
-# ENHANCED SYSTEM PROMPTS - OPTIMIZED FOR DEVSTRAL
-
-# Enhanced chat personalities
-ENHANCED_GEMINI_PERSONALITY = """You are Ava, an expert software engineering assistant with deep knowledge of Python, web development, data science, and modern development practices. You're enthusiastic, precise, and always provide actionable solutions.
-
-Key traits:
-- Give concrete, working code examples with proper error handling
-- Explain complex concepts clearly with practical examples  
-- Suggest best practices and modern Python patterns
-- Help debug issues systematically
-- Provide architecture guidance for scalable solutions
-
-Always prioritize code quality, maintainability, and real-world applicability in your responses."""
-
-ENHANCED_QWEN_PERSONALITY = """You are Ava, a specialized coding assistant with expertise in software architecture, algorithm optimization, and full-stack development. You focus on delivering production-ready solutions.
-
-Approach:
-- Provide complete, well-documented code solutions
-- Explain reasoning behind technical decisions
-- Suggest performance optimizations and best practices
-- Help with debugging and code review
-- Offer architectural insights for complex projects
-
-Your responses should be technical, precise, and immediately actionable for developers."""
-
-# SPECIALIZED CODING PROMPTS FOR DIFFERENT TASK TYPES
+# ENHANCED: Specialized System Prompts for Different Task Types
 
 API_DEVELOPMENT_PROMPT = """You are a backend API development specialist. Follow these guidelines:
 
@@ -438,5 +376,85 @@ QUALITY ASSURANCE:
 - Design for maintainability and future extension
 - Include docstring examples for complex functions"""
 
-# Legacy system prompt (kept for backward compatibility)
+# OPTIMIZED: Use the enhanced general prompt as the default coder prompt
 CODER_AI_SYSTEM_PROMPT = GENERAL_CODING_PROMPT
+
+# --- UI & Asset Constants ---
+CHAT_FONT_FAMILY = "Segoe UI"
+CHAT_FONT_SIZE = 12
+LOADING_GIF_FILENAME = "loading.gif"
+APP_ICON_FILENAME = "Synchat.ico"
+
+USER_BUBBLE_COLOR_HEX = "#00e676"
+USER_TEXT_COLOR_HEX = "#0d1117"
+AI_BUBBLE_COLOR_HEX = "#21262d"
+AI_TEXT_COLOR_HEX = "#f0f6fc"
+SYSTEM_BUBBLE_COLOR_HEX = "#30363d"
+SYSTEM_TEXT_COLOR_HEX = "#c9d1d9"
+ERROR_BUBBLE_COLOR_HEX = "#f85149"
+ERROR_TEXT_COLOR_HEX = "#ffffff"
+BUBBLE_BORDER_COLOR_HEX = "#30363d"
+TIMESTAMP_COLOR_HEX = "#6e7681"
+CODE_BLOCK_BG_COLOR_HEX = "#161b22"
+
+# --- Path Constants ---
+if getattr(sys, 'frozen', False):
+    APP_BASE_DIR = os.path.dirname(sys.executable)
+else:
+    APP_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Project root
+
+USER_DATA_DIR_NAME = ".ava_pys6_data_p1"
+USER_DATA_DIR = os.path.join(os.path.expanduser("~"), USER_DATA_DIR_NAME)
+
+ASSETS_DIR_NAME = "assets"
+ASSETS_PATH = os.path.join(APP_BASE_DIR, ASSETS_DIR_NAME)
+
+STYLESHEET_FILENAME = "style.qss"
+BUBBLE_STYLESHEET_FILENAME = "bubble_style.qss"
+UI_DIR_NAME = "ui"
+UI_DIR_PATH = os.path.join(APP_BASE_DIR, UI_DIR_NAME)
+
+STYLE_PATHS_TO_CHECK = [
+    os.path.join(APP_BASE_DIR, UI_DIR_NAME, STYLESHEET_FILENAME),  # Check ui/style.qss
+    os.path.join(APP_BASE_DIR, STYLESHEET_FILENAME)  # Check root/style.qss
+]
+BUBBLE_STYLESHEET_PATH = os.path.join(UI_DIR_PATH, BUBBLE_STYLESHEET_FILENAME)
+
+# --- RAG Specific Constants ---
+RAG_COLLECTIONS_DIR_NAME = "rag_collections"
+RAG_COLLECTIONS_PATH = os.path.join(USER_DATA_DIR, RAG_COLLECTIONS_DIR_NAME)
+GLOBAL_COLLECTION_ID = "global_knowledge"
+RAG_NUM_RESULTS = 5
+RAG_CHUNK_SIZE = 1000
+RAG_CHUNK_OVERLAP = 150
+RAG_MAX_FILE_SIZE_MB = 50
+MAX_SCAN_DEPTH = 5
+
+ALLOWED_TEXT_EXTENSIONS = {
+    '.txt', '.md', '.markdown', '.rst',
+    '.py', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env',
+    '.c', '.cpp', '.h', '.hpp', '.java', '.go', '.rs', '.swift', '.php', '.rb',
+    '.pdf', '.docx',
+}
+
+DEFAULT_IGNORED_DIRS = {
+    '.git', '.idea', '__pycache__', 'venv', 'node_modules', 'build', 'dist',
+    '.pytest_cache', '.vscode', '.env', '.DS_Store', 'logs',
+}
+# --- End RAG Specific Constants ---
+
+# --- Logging Constants ---
+LOG_LEVEL = "DEBUG"
+LOG_FILE_NAME = "ava_pys6_phase1.log"
+LOG_FORMAT = '%(asctime)s.%(msecs)03d - %(levelname)-8s - [%(name)s:%(module)s.%(funcName)s:%(lineno)d] - %(message)s'
+LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
+# --- End Logging Constants ---
+
+# Ensure user data directory exists (critical for many operations)
+try:
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+    logger.info(f"User data directory ensured at: {USER_DATA_DIR}")
+except OSError as e:
+    logger.critical(f"CRITICAL: Error creating user data directory in constants.py: {e}", exc_info=True)
+    # Depending on how critical this is at import time, you might raise an error or exit.
+    # For now, just logging critically.

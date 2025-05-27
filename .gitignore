@@ -226,3 +226,4 @@ ui_*.h
 **/__pycache__/
 **/*.pyc
 **/*.pyo!/.venv/
+/ava_generated_projects/
