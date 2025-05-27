@@ -1,5 +1,3 @@
-# Fixed backend_coordinator.py - Key changes for performance
-
 import asyncio
 import logging
 import uuid
@@ -49,11 +47,9 @@ class BackendCoordinator(QObject):
         self._active_backend_tasks: Dict[str, asyncio.Task] = {}
         self._overall_is_busy: bool = False
 
-        # NEW: Cache for model fetching to prevent redundant calls
-        self._models_fetch_cache: Dict[str, float] = {}  # backend_id -> timestamp
-        self._models_fetch_cooldown = 30.0  # 30 seconds cooldown
+        self._models_fetch_cache: Dict[str, float] = {}
+        self._models_fetch_cooldown = 30.0
 
-        # NEW: Async model fetching timer
         self._model_fetch_timer: Optional[QTimer] = None
 
         logger.info(
@@ -87,11 +83,9 @@ class BackendCoordinator(QObject):
         self._current_model_names[backend_id] = model_name
         self._current_system_prompts[backend_id] = system_prompt
 
-        # NEW: Only emit with cached models initially, fetch fresh models asynchronously
         cached_models = self._available_models_map.get(backend_id, [])
         self._event_bus.backendConfigurationChanged.emit(backend_id, model_name, is_configured, cached_models)
 
-        # NEW: Schedule async model fetch if configured successfully
         if is_configured:
             self._schedule_async_model_fetch(backend_id)
 
@@ -108,14 +102,13 @@ class BackendCoordinator(QObject):
             self._model_fetch_timer.setSingleShot(True)
             self._model_fetch_timer.timeout.connect(lambda: self._fetch_models_async(backend_id))
 
-        self._model_fetch_timer.start(100)  # Small delay to not block UI
+        self._model_fetch_timer.start(100)
 
     def _fetch_models_async(self, backend_id: str):
         """Fetch models asynchronously for a specific backend"""
         import time
         current_time = time.time()
 
-        # Check cooldown to prevent excessive fetching
         if backend_id in self._models_fetch_cache:
             if current_time - self._models_fetch_cache[backend_id] < self._models_fetch_cooldown:
                 logger.debug(f"BC: Skipping model fetch for '{backend_id}' due to cooldown")
@@ -126,12 +119,10 @@ class BackendCoordinator(QObject):
             return
 
         try:
-            # NEW: Fetch models with timeout
             available_models = adapter.get_available_models()
             self._available_models_map[backend_id] = available_models
             self._models_fetch_cache[backend_id] = current_time
 
-            # Emit updated configuration with fresh models
             self._event_bus.backendConfigurationChanged.emit(
                 backend_id,
                 self._current_model_names[backend_id],
@@ -142,7 +133,6 @@ class BackendCoordinator(QObject):
 
         except Exception as e_fetch:
             logger.warning(f"BC: Failed to fetch models for '{backend_id}': {e_fetch}")
-            # Keep cached models if fetch fails
             cached_models = self._available_models_map.get(backend_id, [])
             self._event_bus.backendConfigurationChanged.emit(
                 backend_id,
@@ -153,14 +143,12 @@ class BackendCoordinator(QObject):
 
     def get_available_models_for_backend(self, backend_id: str) -> List[str]:
         """Get available models - return cached models immediately, fetch fresh in background"""
-        # Return cached models immediately
         cached_models = self._available_models_map.get(backend_id, [])
 
         adapter = self._backend_adapters.get(backend_id)
         if not adapter:
             return cached_models
 
-        # Check if we should refresh (but don't block)
         import time
         current_time = time.time()
         should_refresh = (
@@ -172,8 +160,6 @@ class BackendCoordinator(QObject):
             self._schedule_async_model_fetch(backend_id)
 
         return cached_models
-
-    # ... (rest of the methods remain the same but with improved error handling)
 
     def initiate_llm_chat_request(self,
                                   target_backend_id: str,
@@ -270,18 +256,15 @@ class BackendCoordinator(QObject):
             stream_iterator = adapter.get_response_stream(history, options)
             chunk_count = 0
 
-            # CRITICAL FIX: Add periodic yielding to prevent GUI blocking
             async for chunk in stream_iterator:
                 chunk_count += 1
                 logger.debug(f"BC: Emitting chunk #{chunk_count} for {request_id}: '{chunk[:30]}...'")
                 self._event_bus.llmStreamChunkReceived.emit(request_id, chunk)
                 response_buffer += chunk
 
-                # CRITICAL: Yield control back to Qt event loop every few chunks
                 if chunk_count % 5 == 0:
                     await asyncio.sleep(0)
 
-                # Additional safety: yield on long chunks
                 if len(chunk) > 100:
                     await asyncio.sleep(0)
 

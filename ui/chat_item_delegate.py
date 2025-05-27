@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
-import html  # Added for html.escape
+import html
 
 from PySide6.QtCore import QModelIndex, QRect, QPoint, QSize, Qt, QObject, QByteArray, QPersistentModelIndex, Slot, \
     Signal
@@ -23,18 +23,17 @@ except ImportError as e_delegate_import:
 
 logger = logging.getLogger(__name__)
 
-# Modern professional bubble dimensions
-BUBBLE_PADDING_V = 14      # Generous but not excessive
-BUBBLE_PADDING_H = 18      # Professional spacing
-BUBBLE_MARGIN_V = 12       # Clean separation
-BUBBLE_MARGIN_H = 16       # Professional margins
-BUBBLE_RADIUS = 12         # Modern but not too playful
+BUBBLE_PADDING_V = 14
+BUBBLE_PADDING_H = 18
+BUBBLE_MARGIN_V = 12
+BUBBLE_MARGIN_H = 16
+BUBBLE_RADIUS = 12
 IMAGE_PADDING = 5
 MAX_IMAGE_WIDTH = 250
 MAX_IMAGE_HEIGHT = 250
 MIN_BUBBLE_WIDTH = 60
 USER_BUBBLE_INDENT_FACTOR = 0.20
-TIMESTAMP_PADDING_TOP = 6  # Slightly more space for timestamps
+TIMESTAMP_PADDING_TOP = 6
 TIMESTAMP_HEIGHT = 15
 BUBBLE_MAX_WIDTH_PERCENTAGE = 0.75
 
@@ -79,7 +78,21 @@ class ChatItemDelegate(QStyledItemDelegate):
         self._active_loading_movies: Dict[QPersistentModelIndex, QMovie] = {}
         self._view_ref: Optional[QWidget] = None
 
+        self._bubble_stylesheet_content: str = ""
+        self._load_bubble_stylesheet()
         self._init_indicator_assets()
+
+    def _load_bubble_stylesheet(self):
+        try:
+            qss_path = constants.BUBBLE_STYLESHEET_PATH
+            if os.path.exists(qss_path):
+                with open(qss_path, "r", encoding="utf-8") as f:
+                    self._bubble_stylesheet_content = f.read()
+                logger.info(f"ChatItemDelegate: Loaded bubble stylesheet from: {qss_path}")
+            else:
+                logger.warning(f"ChatItemDelegate: Bubble stylesheet not found at: {qss_path}. Using default QTextDocument styles.")
+        except Exception as e:
+            logger.error(f"ChatItemDelegate: Error loading bubble stylesheet: {e}", exc_info=True)
 
     def _init_indicator_assets(self):
         try:
@@ -120,9 +133,8 @@ class ChatItemDelegate(QStyledItemDelegate):
         for p_index, active_movie in list(self._active_loading_movies.items()):
             if active_movie == movie_sender:
                 if p_index.isValid() and self._view_ref.model() and \
-                        self._view_ref.model().data(p_index,
-                                                    LoadingStatusRole) == MessageLoadingState.LOADING:  # type: ignore
-                    self._view_ref.update(p_index)  # type: ignore
+                        self._view_ref.model().data(p_index, LoadingStatusRole) == MessageLoadingState.LOADING:
+                    self._view_ref.update(p_index)
                 else:
                     self._remove_active_movie(p_index)
                 break
@@ -153,7 +165,7 @@ class ChatItemDelegate(QStyledItemDelegate):
             painter.restore()
             return
 
-        loading_status = index.model().data(index, LoadingStatusRole)  # type: ignore
+        loading_status = index.model().data(index, LoadingStatusRole)
         if not isinstance(loading_status, MessageLoadingState):
             loading_status = MessageLoadingState.IDLE
 
@@ -322,34 +334,16 @@ class ChatItemDelegate(QStyledItemDelegate):
 
         _, text_color = self._get_colors(message.role)
 
-        stylesheet_content = f"""
-            body {{ color: {text_color.name()}; }}
-            p {{ margin: 0 0 0px 0; padding: 0; line-height: 140%; }}
-            ul, ol {{ margin: 2px 0 6px 18px; padding: 0; line-height: 140%;}}
-            li {{ margin-bottom: 3px; }}
-            pre {{ 
-                background-color: {CODE_BLOCK_BG_COLOR.name()}; 
-                border: 1px solid {BUBBLE_BORDER_COLOR.name()}; 
-                padding: 8px; 
-                margin: 6px 0; 
-                border-radius: 4px; 
-                font-family: '{self._font.family()}', monospace;
-                font-size: {self._font.pointSize() - 1}pt;
-                color: {AI_TEXT_COLOR.name()}; 
-                white-space: pre-wrap; 
-                word-wrap: break-word; 
-                line-height: 130%;
-            }}
-            code {{ 
-                background-color: {CODE_BLOCK_BG_COLOR.lighter(115).name()}; 
-                padding: 1px 4px; 
-                border-radius: 3px; 
-                font-family: '{self._font.family()}', monospace;
-                font-size: {int(self._font.pointSize() * 0.9)}pt;
-                color: {AI_TEXT_COLOR.lighter(110).name()};
-            }}
-        """
-        doc.setDefaultStyleSheet(stylesheet_content)
+        if self._bubble_stylesheet_content:
+            doc.setDefaultStyleSheet(self._bubble_stylesheet_content)
+        else:
+            fallback_stylesheet = f"""
+                body {{ color: {text_color.name()}; }}
+                p {{ margin: 0 0 0px 0; padding: 0; line-height: 140%; }}
+                pre {{ background-color: {CODE_BLOCK_BG_COLOR.name()}; border: 1px solid {BUBBLE_BORDER_COLOR.name()}; padding: 8px; margin: 6px 0; border-radius: 4px; font-family: '{self._font.family()}', monospace; font-size: {self._font.pointSize() -1}pt; color: {AI_TEXT_COLOR.name()}; white-space: pre-wrap; word-wrap: break-word; }}
+                code {{ background-color: {CODE_BLOCK_BG_COLOR.lighter(115).name()}; padding: 1px 4px; border-radius: 3px; font-family: '{self._font.family()}', monospace; font-size: {int(self._font.pointSize() * 0.9)}pt; color: {AI_TEXT_COLOR.lighter(110).name()};}}
+            """
+            doc.setDefaultStyleSheet(fallback_stylesheet)
 
         html_content = self._convert_text_to_html(text_content_for_cache,
                                                   message.role == SYSTEM_ROLE or message.role == ERROR_ROLE)

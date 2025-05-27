@@ -3,6 +3,7 @@ import asyncio
 import base64
 import logging
 import sys
+import re
 from typing import List, Optional, AsyncGenerator, Dict, Any, Tuple, Type
 
 try:
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 class OllamaAdapter(BackendInterface):
     DEFAULT_OLLAMA_HOST = "http://localhost:11434"
-    DEFAULT_MODEL = "llama3:latest"
+    DEFAULT_MODEL = "qwen2.5-coder:14b"
 
     def __init__(self):
         super().__init__()
@@ -58,8 +59,10 @@ class OllamaAdapter(BackendInterface):
         logger.info("OllamaAdapter initialized.")
 
     def configure(self, api_key: Optional[str], model_name: Optional[str], system_prompt: Optional[str] = None) -> bool:
+        effective_model_name = model_name if model_name and model_name.strip() else self.DEFAULT_MODEL
         logger.info(
-            f"OllamaAdapter: Configuring. Host: {self._ollama_host}, Model: {model_name}. System Prompt: {'Yes' if system_prompt else 'No'}")
+            f"OllamaAdapter: Configuring. Host: {self._ollama_host}, Effective Model: {effective_model_name}. System Prompt: {'Yes' if system_prompt else 'No'}")
+
         self._sync_client = None
         self._is_configured = False
         self._last_error = None
@@ -71,27 +74,30 @@ class OllamaAdapter(BackendInterface):
             logger.error(self._last_error)
             return False
 
-        self._model_name = model_name if model_name and model_name.strip() else self.DEFAULT_MODEL
+        self._model_name = effective_model_name
         self._system_prompt = system_prompt.strip() if isinstance(system_prompt,
                                                                   str) and system_prompt.strip() else None
 
         try:
-            self._sync_client = ollama.Client(host=self._ollama_host, timeout=10.0)  # General client timeout
+            logger.info(f"  Attempting to create Ollama client for host: {self._ollama_host} with timeout 20s.")
+            self._sync_client = ollama.Client(host=self._ollama_host, timeout=20.0)
+
+            logger.info(f"  Ollama client created. Testing connection with .list() call...")
             try:
-                self._sync_client.list()  # Test connection
-                logger.info(f"  Successfully connected to Ollama at {self._ollama_host}.")
-            except ollama.RequestError as conn_err_req:  # Covers httpx.ConnectError, httpx.ReadTimeout etc.
-                self._last_error = f"Failed to connect to Ollama at {self._ollama_host} (RequestError): {conn_err_req}"
-                logger.error(self._last_error, exc_info=False)  # Keep exc_info brief for connection errors
-                self._sync_client = None
-                return False
-            except ConnectionRefusedError:  # Explicitly catch this
-                self._last_error = f"Connection refused by Ollama at {self._ollama_host}. Is Ollama running?"
+                self._sync_client.list()
+                logger.info(f"  Successfully connected to Ollama and listed models at {self._ollama_host}.")
+            except ollama.RequestError as conn_err_req:
+                self._last_error = f"Failed to connect/list models from Ollama at {self._ollama_host}. Is Ollama server running and accessible? (RequestError): {conn_err_req}"
                 logger.error(self._last_error, exc_info=False)
                 self._sync_client = None
                 return False
-            except Exception as conn_err_other:  # Catch other potential issues
-                self._last_error = f"Failed to connect/verify Ollama at {self._ollama_host}: {type(conn_err_other).__name__} - {conn_err_other}"
+            except ConnectionRefusedError:
+                self._last_error = f"Connection refused by Ollama at {self._ollama_host}. Is Ollama server running?"
+                logger.error(self._last_error, exc_info=False)
+                self._sync_client = None
+                return False
+            except Exception as conn_err_other:
+                self._last_error = f"Unexpected error during Ollama connection test (.list()) at {self._ollama_host}: {type(conn_err_other).__name__} - {conn_err_other}"
                 logger.error(self._last_error, exc_info=True)
                 self._sync_client = None
                 return False
@@ -101,7 +107,7 @@ class OllamaAdapter(BackendInterface):
                 f"  OllamaAdapter configured successfully for model '{self._model_name}' at {self._ollama_host}.")
             return True
         except Exception as e:
-            self._last_error = f"Unexpected error configuring Ollama client: {type(e).__name__} - {e}"
+            self._last_error = f"Unexpected error creating Ollama client for host '{self._ollama_host}': {type(e).__name__} - {e}"
             logger.error(self._last_error, exc_info=True)
             self._sync_client = None
             return False
@@ -127,9 +133,13 @@ class OllamaAdapter(BackendInterface):
 
         messages_for_api = self._format_history_for_api(history)
         if not messages_for_api and not self._system_prompt:
-            self._last_error = "Cannot send request: No valid messages in history for API format and no system prompt."
-            logger.error(self._last_error)
-            raise ValueError(self._last_error)
+            if not messages_for_api and self._system_prompt and not any(
+                    m['role'] == 'system' for m in messages_for_api):
+                logger.debug("OllamaAdapter: History is empty, but a system prompt is configured. This is valid.")
+            else:
+                self._last_error = "Cannot send request: No valid messages in history for API format and no system prompt."
+                logger.error(self._last_error)
+                raise ValueError(self._last_error)
 
         logger.debug(f"  Sending {len(messages_for_api)} formatted messages to model '{self._model_name}'.")
 
@@ -150,7 +160,6 @@ class OllamaAdapter(BackendInterface):
                 )
 
             ollama_sync_iterator = await asyncio.to_thread(_get_ollama_iterator)
-
             loop = asyncio.get_running_loop()
             chunk_count = 0
 
@@ -201,7 +210,6 @@ class OllamaAdapter(BackendInterface):
                     logger.info(
                         f"  Ollama Token Usage ('{self._model_name}'): Prompt={self._last_prompt_tokens}, Completion={self._last_completion_tokens}")
                     break
-
         except ollama.ResponseError as e_resp:
             self._last_error = f"Ollama API Response Error: {e_resp.status_code} - {e_resp.error}"
             logger.error(self._last_error, exc_info=True)
@@ -216,170 +224,191 @@ class OllamaAdapter(BackendInterface):
                 raise
 
     def get_available_models(self) -> List[str]:
-        """Get available models with timeout protection"""
         self._last_error = None
         if not API_LIBRARY_AVAILABLE:
             self._last_error = "Ollama library not installed."
             logger.error(self._last_error)
             return []
 
+        model_names: List[str] = []
         client_to_use: Optional[ollama.Client] = self._sync_client
+        can_attempt_live_fetch = True
 
-        if not client_to_use:
+        if not client_to_use and self._is_configured:
+            logger.warning(
+                "OllamaAdapter.get_available_models: Adapter is configured but client is None. This is unexpected.")
             try:
-                logger.info("OllamaAdapter.get_available_models: Creating temporary client with short timeout")
-                # NEW: Much shorter timeout for startup checks
-                client_to_use = ollama.Client(host=self._ollama_host, timeout=2.0)
-
-                # NEW: Quick connection test with socket check
+                logger.info(
+                    "Attempting to re-create Ollama client for model listing as it was None despite being configured.")
+                client_to_use = ollama.Client(host=self._ollama_host, timeout=7.0)
+                client_to_use.list()
+            except Exception as e_recreate:
+                logger.error(f"Failed to re-create Ollama client during get_available_models: {e_recreate}")
+                can_attempt_live_fetch = False
+        elif not client_to_use:
+            logger.info(
+                "OllamaAdapter.get_available_models: No pre-configured client. Attempting temporary client for model listing.")
+            try:
                 import socket
                 from urllib.parse import urlparse
-
-                # Parse host to check if Ollama is running
-                parsed = urlparse(
+                parsed_host = urlparse(
                     self._ollama_host if self._ollama_host.startswith('http') else f'http://{self._ollama_host}')
-                host = parsed.hostname or 'localhost'
-                port = parsed.port or 11434
-
-                # Quick socket check before API call
+                host = parsed_host.hostname or 'localhost'
+                port = parsed_host.port or 11434
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(1.0)  # 1 second timeout
+                sock.settimeout(2.0)
                 result = sock.connect_ex((host, port))
                 sock.close()
-
                 if result != 0:
-                    self._last_error = f"Ollama not running on {self._ollama_host}"
+                    self._last_error = f"Ollama server not responding at {host}:{port} (socket check failed for model list)."
                     logger.warning(self._last_error)
-                    return []
-
-                # Quick test to see if server is reachable
-                client_to_use.list()
-
-            except socket.timeout:
-                self._last_error = f"Ollama connection timeout to {self._ollama_host}"
-                logger.warning(self._last_error)
-                return []
+                    can_attempt_live_fetch = False
+                else:
+                    client_to_use = ollama.Client(host=self._ollama_host, timeout=7.0)
+                    client_to_use.list()
             except Exception as e_temp_client:
-                self._last_error = f"Ollama not reachable at {self._ollama_host}: {type(e_temp_client).__name__}"
+                self._last_error = f"Failed to connect temporary Ollama client for model listing: {type(e_temp_client).__name__}"
                 logger.warning(self._last_error)
-                return []
+                can_attempt_live_fetch = False
 
         if not client_to_use:
-            self._last_error = "Ollama client not available for listing models."
-            logger.error(self._last_error)
-            return []
+            can_attempt_live_fetch = False
 
-        model_names: List[str] = []
-        try:
-            # NEW: Use threading for timeout protection
-            import threading
-            import queue
+        if can_attempt_live_fetch and client_to_use:
+            try:
+                import threading
+                import queue
+                result_queue = queue.Queue()
+                exception_queue = queue.Queue()
 
-            result_queue = queue.Queue()
-            exception_queue = queue.Queue()
+                def fetch_models_thread():
+                    try:
+                        models_response = client_to_use.list()
+                        result_queue.put(models_response)
+                    except Exception as e_thread:
+                        exception_queue.put(e_thread)
 
-            def fetch_models():
-                try:
-                    models_response = client_to_use.list()
-                    result_queue.put(models_response)
-                except Exception as e:
-                    exception_queue.put(e)
+                fetch_thread = threading.Thread(target=fetch_models_thread)
+                fetch_thread.daemon = True
+                fetch_thread.start()
+                fetch_thread.join(timeout=10.0)
+                if fetch_thread.is_alive():
+                    logger.warning(f"Ollama model fetch timed out for {self._ollama_host} after 10 seconds.")
+                    self._last_error = "Ollama model fetch timed out."
+                elif not exception_queue.empty():
+                    raise exception_queue.get()
+                elif not result_queue.empty():
+                    models_response_data = result_queue.get()
+                    items_to_parse = []
+                    if isinstance(models_response_data, dict) and 'models' in models_response_data:
+                        items_to_parse = models_response_data['models']
+                    elif isinstance(models_response_data, list):
+                        items_to_parse = models_response_data
+                    for item in items_to_parse:
+                        model_id_to_add = None
+                        if _ollama_types_imported_successfully and isinstance(item, _OllamaModelType):
+                            model_id_to_add = getattr(item, 'name', None)
+                        elif isinstance(item, dict):
+                            model_id_to_add = item.get('name') or item.get('model')
+                        elif hasattr(item, 'name') and isinstance(item.name, str):
+                            model_id_to_add = item.name
+                        elif hasattr(item, 'model') and isinstance(item.model, str):
+                            model_id_to_add = item.model
+                        if model_id_to_add and isinstance(model_id_to_add, str):
+                            model_names.append(model_id_to_add)
+                    logger.info(f"Fetched {len(model_names)} models live from Ollama.")
+                else:
+                    logger.warning(f"No response from Ollama model list at {self._ollama_host}, but no explicit error.")
+                    self._last_error = "Ollama returned no models without error."
+            except Exception as e_fetch:
+                self._last_error = f"Error fetching Ollama models: {type(e_fetch).__name__} - {e_fetch}"
+                logger.warning(self._last_error, exc_info=True)
+        elif not can_attempt_live_fetch:
+            logger.info("Skipping live Ollama model fetch due to initial connection/client issues. Will use defaults.")
 
-            # Start fetch in separate thread
-            fetch_thread = threading.Thread(target=fetch_models)
-            fetch_thread.daemon = True
-            fetch_thread.start()
+        # Enhanced default candidates list based on user's provided list
+        default_candidates = [
+            "qwen2.5-coder:32b", "qwen2.5-coder:14b", "qwen2.5-coder:latest",
+            "qwen3:30b", "qwen2:latest", "qwen:latest",
+            "devstral:24b", "devstral:latest",
+            "codellama:34b", "codellama:13b", "codellama:13b-instruct", "codellama:13b-python", "codellama:7b",
+            "codellama:latest",
+            "llama3:30b", "llama3:latest",
+            "deepseek-coder:6.7b-instruct-q5_K_M", "deepseek-r1:14b",
+            "wizardcoder:13b-python",
+            "starcoder2:15b-instruct", "starcoder2:7b",
+            "mistral:latest",
+            "phi3:latest",
+            self.DEFAULT_MODEL
+        ]
+        if self._model_name and self._model_name not in default_candidates:
+            default_candidates.insert(0, self._model_name)
 
-            # Wait with timeout
-            fetch_thread.join(timeout=3.0)  # 3 second max wait
+        combined_list = list(set(model_names + [m for m in default_candidates if m not in model_names]))
+        if not combined_list: combined_list.append(self.DEFAULT_MODEL)
+        combined_list = list(set(combined_list))
 
-            if fetch_thread.is_alive():
-                logger.warning(f"Ollama model fetch timed out for {self._ollama_host}")
-                return self.DEFAULT_MODEL  # Return at least the default
+        def sort_key_ollama(model_name_str: str):
+            name_lower = model_name_str.lower()
+            is_latest = "latest" in name_lower
+            is_current_adapter_model = model_name_str == self._model_name
 
-            # Check for exceptions
-            if not exception_queue.empty():
-                raise exception_queue.get()
+            priority = 10
 
-            # Get results
-            if result_queue.empty():
-                logger.warning(f"No response from Ollama at {self._ollama_host}")
-                return [self.DEFAULT_MODEL]
+            if "qwen2.5-coder:32b" in name_lower:
+                priority = 0
+            elif "qwen2.5-coder:14b" in name_lower:
+                priority = 1
+            elif "qwen2.5-coder:latest" in name_lower:
+                priority = 2
+            elif "qwen3:30b" in name_lower:
+                priority = 3
+            elif "qwen" in name_lower:
+                priority = 4
 
-            models_response_data = result_queue.get()
-
-            # Parse models (keeping your existing parsing logic)
-            items_to_parse = []
-            if isinstance(models_response_data, dict) and 'models' in models_response_data:
-                items_to_parse = models_response_data['models']
-            elif isinstance(models_response_data, list):
-                items_to_parse = models_response_data
-
-            for item in items_to_parse:
-                model_id_to_add = None
-                if _ollama_types_imported_successfully and isinstance(item, _OllamaModelType):
-                    model_id_to_add = getattr(item, 'name', None)
-                elif isinstance(item, dict):
-                    model_id_to_add = item.get('name') or item.get('model')
-                elif hasattr(item, 'name') and isinstance(item.name, str):
-                    model_id_to_add = item.name
-                elif hasattr(item, 'model') and isinstance(item.model, str):
-                    model_id_to_add = item.model
-
-                if model_id_to_add and isinstance(model_id_to_add, str):
-                    model_names.append(model_id_to_add)
-
-            # Add defaults if no models found
-            if not model_names:
-                model_names.append(self.DEFAULT_MODEL)
-
-            # Keep your existing sorting logic
-            default_candidates = ["llama3:latest", "codellama:latest", "mistral:latest", "phi3:latest", "qwen2:latest",
-                                  self.DEFAULT_MODEL]
-            if self._model_name and self._model_name != self.DEFAULT_MODEL:
-                default_candidates.append(self._model_name)
-
-            combined_list = list(set(model_names + [m for m in default_candidates if m not in model_names]))
-
-            def sort_key_ollama(model_name_str: str):
-                name_lower = model_name_str.lower()
-                is_latest = "latest" in name_lower
-                is_default_class_model = model_name_str == self.DEFAULT_MODEL
-                is_current_adapter_model = model_name_str == self._model_name
-
+            elif "devstral" in name_lower:
                 priority = 5
-                if "llama3" in name_lower:
-                    priority = 0
-                elif "devstral" in name_lower:
-                    priority = 0
-                elif "qwen" in name_lower:
-                    priority = 1
-                elif "codellama" in name_lower:
-                    priority = 2
-                elif "mistral" in name_lower:
-                    priority = 3
-                elif "phi3" in name_lower:
-                    priority = 4
+            elif "codellama" in name_lower:
+                priority = 6
+            elif "llama3" in name_lower:
+                priority = 7
+            elif "deepseek" in name_lower:
+                priority = 8
+            elif "wizardcoder" in name_lower:
+                priority = 8
+            elif "starcoder" in name_lower:
+                priority = 8
+            elif "mistral" in name_lower:
+                priority = 9
+            elif "phi3" in name_lower:
+                priority = 9
 
-                return (
-                    0 if is_current_adapter_model else 1,
-                    0 if is_default_class_model else 1,
-                    priority,
-                    0 if is_latest else 1,
-                    name_lower
-                )
+            size_priority = 100
+            if 'b' in name_lower:
+                try:
+                    size_match = re.search(r'(\d+(?:\.\d+)?)(?:b|B)', name_lower)
+                    if size_match:
+                        size_priority = -float(size_match.group(1))
+                except:
+                    pass
 
-            final_model_list = sorted(combined_list, key=sort_key_ollama)
-            return final_model_list
+            return (
+                0 if is_current_adapter_model else 1,
+                priority,
+                size_priority,
+                0 if is_latest else 1,
+                name_lower
+            )
 
-        except ollama.RequestError as e_req:
-            self._last_error = f"Ollama API Request Error: {e_req}. Is server running?"
-            logger.warning(self._last_error)
-            return [self.DEFAULT_MODEL]  # Return default instead of empty list
-        except Exception as e:
-            self._last_error = f"Error fetching Ollama models: {type(e).__name__} - {e}"
-            logger.warning(self._last_error)
-            return [self.DEFAULT_MODEL]  # Return default instead of empty list
+        final_model_list = sorted(combined_list, key=sort_key_ollama)
+
+        if not final_model_list:
+            logger.error("OllamaAdapter: Final model list is unexpectedly empty. Returning default model only.")
+            return [self.DEFAULT_MODEL]
+
+        logger.info(
+            f"OllamaAdapter: Returning {len(final_model_list)} available models. Top models: {final_model_list[:5]}")
+        return final_model_list
 
     def _format_history_for_api(self, history: List[ChatMessage]) -> List[Dict[str, Any]]:
         ollama_messages: List[Dict[str, Any]] = []
@@ -408,6 +437,8 @@ class OllamaAdapter(BackendInterface):
 
             if text_content_for_api:
                 message_payload["content"] = text_content_for_api
+            elif not text_content_for_api and role_for_api == "system" and not self._system_prompt:
+                message_payload["content"] = ""
 
             if hasattr(msg, 'has_images') and msg.has_images and hasattr(msg, 'image_parts') and msg.image_parts:
                 base64_image_list: List[str] = []
@@ -415,18 +446,24 @@ class OllamaAdapter(BackendInterface):
                     if isinstance(img_part_dict, dict) and img_part_dict.get("type") == "image" and isinstance(
                             img_part_dict.get("data"), str):
                         try:
-                            base64.b64decode(img_part_dict["data"], validate=True)
-                            base64_image_list.append(img_part_dict["data"])
-                        except Exception as e_b64:
-                            logger.warning(f"Invalid base64 data in image part. Skipping. Error: {e_b64}")
+                            if len(img_part_dict["data"]) > 10 and not img_part_dict[
+                                "data"].isspace():
+                                base64_image_list.append(img_part_dict["data"])
+                            else:
+                                logger.warning("Skipping potentially invalid or empty base64 image data.")
+                        except Exception as e_b64_check:
+                            logger.warning(f"Error checking base64 data in image part: {e_b64_check}")
                 if base64_image_list:
                     message_payload["images"] = base64_image_list
 
             if "content" in message_payload or "images" in message_payload:
                 ollama_messages.append(message_payload)
-            elif role_for_api == "system":
-                logger.debug(f"OllamaAdapter: Adding system message (role only) for {self._model_name}")
+            elif role_for_api == "system" and not self._system_prompt and "content" not in message_payload:
+                logger.debug(
+                    f"OllamaAdapter: Adding system message (role only) for {self._model_name} because no adapter system prompt is set.")
+                message_payload["content"] = ""
                 ollama_messages.append(message_payload)
+
         return ollama_messages
 
     def get_last_token_usage(self) -> Optional[Tuple[int, int]]:
