@@ -1,24 +1,19 @@
-# utils/constants.py
 import logging
 import os
 import sys
+
+from anyio.streams import file
 
 logger = logging.getLogger(__name__)
 
 APP_NAME = "AvA: PySide6 Rebuild"
 APP_VERSION = "1.0.5"
 
-# --- LLM Configuration ---
-# AVA_ASSISTANT_MODIFIED: Changed DEFAULT_CHAT_BACKEND_ID to be a consistent adapter key
 DEFAULT_CHAT_BACKEND_ID = "gemini_chat_default"
-DEFAULT_GEMINI_CHAT_MODEL = "models/gemini-2.5-flash-preview-05-20"  # The actual model for the gemini_chat_default adapter
-DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:14b"  # OPTIMIZED: Better coding model for chat
-# DEFAULT_GPT_CHAT_MODEL = "gpt-3.5-turbo" # Example if you add a GPT default
-
-GENERATOR_BACKEND_ID = "ollama_generator_default"  # This is an adapter key
-DEFAULT_OLLAMA_GENERATOR_MODEL = "devstral:latest"  # OPTIMIZED: Devstral is much better than CodeLlama
-
-# ENHANCED: Specialized System Prompts for Different Task Types
+DEFAULT_GEMINI_CHAT_MODEL = "models/gemini-2.5-flash-preview-05-20"
+DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:14b"
+GENERATOR_BACKEND_ID = "ollama_generator_default"
+DEFAULT_OLLAMA_GENERATOR_MODEL = "devstral:latest"
 
 API_DEVELOPMENT_PROMPT = """You are a backend API development specialist. Follow these guidelines:
 
@@ -54,31 +49,31 @@ async def create_item(item: ItemCreate, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Failed to create item: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-```
-
 SECURITY & VALIDATION:
-- Implement authentication/authorization where needed
-- Validate all inputs with Pydantic models
-- Handle edge cases and provide meaningful error messages
-- Use environment variables for configuration"""
 
+Implement authentication/authorization where needed
+Validate all inputs with Pydantic models
+Handle edge cases and provide meaningful error messages
+Use environment variables for configuration"""
 DATA_PROCESSING_PROMPT = """You are a data processing and analysis specialist. Follow these guidelines:
 
 LIBRARIES & TOOLS:
-- Use pandas for data manipulation and analysis
-- Use numpy for numerical computations
-- Implement proper error handling for data quality issues
-- Use type hints for data structures and return types
 
+Use pandas for data manipulation and analysis
+Use numpy for numerical computations
+Implement proper error handling for data quality issues
+Use type hints for data structures and return types
 CODE REQUIREMENTS:
-- Handle missing data and edge cases gracefully
-- Include data validation and quality checks
-- Provide clear progress indicators for long operations
-- Use efficient algorithms for large datasets
-- Include comprehensive docstrings with examples
 
+Handle missing data and edge cases gracefully
+Include data validation and quality checks
+Provide clear progress indicators for long operations
+Use efficient algorithms for large datasets
+Include comprehensive docstrings with examples
 EXAMPLE PATTERNS:
-```python
+
+Python
+
 import pandas as pd
 import numpy as np
 from typing import Optional, List, Dict, Any
@@ -121,31 +116,31 @@ def process_csv_data(
     except Exception as e:
         logging.error(f"Error processing {file_path}: {e}")
         raise
-```
-
 PERFORMANCE & MEMORY:
-- Use chunking for large files
-- Implement memory-efficient processing
-- Provide options for different output formats
-- Include performance metrics and timing"""
 
+Use chunking for large files
+Implement memory-efficient processing
+Provide options for different output formats
+Include performance metrics and timing"""
 UI_DEVELOPMENT_PROMPT = """You are a desktop UI development specialist using PySide6/PyQt6. Follow these guidelines:
 
 ARCHITECTURE & PATTERNS:
-- Use Model-View-Controller (MVC) or Model-View-ViewModel patterns
-- Implement proper signal-slot connections
-- Create reusable custom widgets
-- Follow Qt best practices for layout management
 
+Use Model-View-Controller (MVC) or Model-View-ViewModel patterns
+Implement proper signal-slot connections
+Create reusable custom widgets
+Follow Qt best practices for layout management
 CODE REQUIREMENTS:
-- Include comprehensive type hints
-- Implement proper event handling and validation
-- Add keyboard shortcuts and accessibility features
-- Handle errors gracefully with user-friendly messages
-- Use Qt's threading for long-running operations
 
+Include comprehensive type hints
+Implement proper event handling and validation
+Add keyboard shortcuts and accessibility features
+Handle errors gracefully with user-friendly messages
+Use Qt's threading for long-running operations
 EXAMPLE PATTERNS:
-```python
+
+Python
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLineEdit, QLabel, QMessageBox
@@ -191,31 +186,31 @@ class DataEntryWidget(QWidget):
 
         data = {"name": name}
         self.data_submitted.emit(data)
-```
-
 USER EXPERIENCE:
-- Implement responsive layouts that work on different screen sizes
-- Add loading indicators for long operations
-- Provide clear feedback for user actions
-- Include proper validation with helpful error messages"""
 
+Implement responsive layouts that work on different screen sizes
+Add loading indicators for long operations
+Provide clear feedback for user actions
+Include proper validation with helpful error messages"""
 UTILITY_DEVELOPMENT_PROMPT = """You are a utility and helper function specialist. Follow these guidelines:
 
 DESIGN PRINCIPLES:
-- Create single-purpose, focused functions
-- Make functions pure when possible (no side effects)
-- Implement proper input validation and error handling
-- Design for reusability and testability
 
+Create single-purpose, focused functions
+Make functions pure when possible (no side effects)
+Implement proper input validation and error handling
+Design for reusability and testability
 CODE REQUIREMENTS:
-- Include comprehensive docstrings with examples
-- Add type hints for all parameters and return values
-- Handle edge cases and provide meaningful error messages
-- Include basic usage examples in docstrings
-- Consider performance implications
 
+Include comprehensive docstrings with examples
+Add type hints for all parameters and return values
+Handle edge cases and provide meaningful error messages
+Include basic usage examples in docstrings
+Consider performance implications
 EXAMPLE PATTERNS:
-```python
+
+Python
+
 from typing import Optional, List, Dict, Any, Union
 from pathlib import Path
 import logging
@@ -285,31 +280,31 @@ def safe_file_read(
     except Exception as e:
         logging.error(f"Error reading {file_path}: {e}")
         return default
-```
-
 TESTING & VALIDATION:
-- Design functions to be easily testable
-- Include parameter validation with clear error messages
-- Consider thread safety for concurrent usage
-- Provide configuration options where appropriate"""
 
+Design functions to be easily testable
+Include parameter validation with clear error messages
+Consider thread safety for concurrent usage
+Provide configuration options where appropriate"""
 GENERAL_CODING_PROMPT = """You are a general-purpose Python development specialist. Follow these guidelines:
 
 PYTHON BEST PRACTICES:
-- Follow PEP 8 style guidelines
-- Use meaningful variable and function names
-- Implement proper error handling and logging
-- Include comprehensive type hints
-- Write self-documenting code with clear docstrings
 
+Follow PEP 8 style guidelines
+Use meaningful variable and function names
+Implement proper error handling and logging
+Include comprehensive type hints
+Write self-documenting code with clear docstrings
 CODE STRUCTURE:
-- Organize code into logical modules and classes
-- Use design patterns appropriately (Factory, Strategy, Observer, etc.)
-- Implement proper separation of concerns
-- Create maintainable and extensible architectures
 
+Organize code into logical modules and classes
+Use design patterns appropriately (Factory, Strategy, Observer, etc.)
+Implement proper separation of concerns
+Create maintainable and extensible architectures
 EXAMPLE PATTERNS:
-```python
+
+Python
+
 from typing import Optional, List, Dict, Any, Protocol
 from abc import ABC, abstractmethod
 import logging
@@ -367,94 +362,120 @@ class BaseProcessor(ABC):
                 message="Processing failed",
                 error=str(e)
             )
-```
-
 QUALITY ASSURANCE:
-- Include error handling for common failure cases
-- Add logging for debugging and monitoring
-- Consider performance implications and optimization
-- Design for maintainability and future extension
-- Include docstring examples for complex functions"""
 
-# OPTIMIZED: Use the enhanced general prompt as the default coder prompt
+Include error handling for common failure cases
+Add logging for debugging and monitoring
+Consider performance implications and optimization
+Design for maintainability and future extension
+Include docstring examples for complex functions"""
 CODER_AI_SYSTEM_PROMPT = GENERAL_CODING_PROMPT
+CHAT_FONT_FAMILY = "Consolas"
+CHAT_FONT_SIZE = 11
 
-# --- UI & Asset Constants ---
-CHAT_FONT_FAMILY = "Segoe UI"
-CHAT_FONT_SIZE = 12
+THEME_BACKGROUND_DARK = "#0D1117"
+THEME_BACKGROUND_MEDIUM = "#161B22"
+THEME_BACKGROUND_LIGHT = "#21262D"
+
+THEME_TEXT_PRIMARY = "#C9D1D9"
+THEME_TEXT_SECONDARY = "#8B949E"
+THEME_TEXT_ACCENT_GREEN = "#39D353"
+THEME_TEXT_ACCENT_GREEN_HOVER = "#5EE878"
+THEME_TEXT_ERROR = "#F85149"
+
+THEME_ACCENT_GREEN = THEME_TEXT_ACCENT_GREEN
+THEME_ACCENT_GREEN_LIGHT = "#2EA043"
+THEME_BORDER_COLOR = "#30363D"
+
+USER_BUBBLE_COLOR_HEX = THEME_ACCENT_GREEN
+USER_TEXT_COLOR_HEX = THEME_BACKGROUND_DARK
+
+AI_BUBBLE_COLOR_HEX = THEME_BACKGROUND_MEDIUM
+AI_TEXT_COLOR_HEX = THEME_TEXT_PRIMARY
+
+SYSTEM_BUBBLE_COLOR_HEX = THEME_BACKGROUND_LIGHT
+SYSTEM_TEXT_COLOR_HEX = THEME_TEXT_SECONDARY
+
+ERROR_BUBBLE_COLOR_HEX = THEME_TEXT_ERROR
+ERROR_TEXT_COLOR_HEX = "#FFFFFF"
+
+BUBBLE_BORDER_COLOR_HEX = THEME_BORDER_COLOR
+TIMESTAMP_COLOR_HEX = THEME_TEXT_SECONDARY
+
+CODE_BLOCK_BG_COLOR_HEX = "#010409"
+
+BUTTON_BG_COLOR = THEME_BACKGROUND_LIGHT
+BUTTON_TEXT_COLOR = THEME_TEXT_PRIMARY
+BUTTON_BORDER_COLOR = THEME_BORDER_COLOR
+BUTTON_HOVER_BG_COLOR = "#2f353c"
+BUTTON_PRESSED_BG_COLOR = "#272b30"
+
+BUTTON_ACCENT_BG_COLOR = THEME_ACCENT_GREEN
+BUTTON_ACCENT_TEXT_COLOR = THEME_BACKGROUND_DARK
+BUTTON_ACCENT_HOVER_BG_COLOR = THEME_TEXT_ACCENT_GREEN_HOVER
+
+SCROLLBAR_BG_COLOR = THEME_BACKGROUND_DARK
+SCROLLBAR_HANDLE_COLOR = "#30363D"
+SCROLLBAR_HANDLE_HOVER_COLOR = "#3C424A"
+
+INPUT_BG_COLOR = THEME_BACKGROUND_MEDIUM
+INPUT_TEXT_COLOR = THEME_TEXT_PRIMARY
+INPUT_BORDER_COLOR = THEME_BORDER_COLOR
+INPUT_FOCUS_BORDER_COLOR = THEME_ACCENT_GREEN
+
 LOADING_GIF_FILENAME = "loading.gif"
 APP_ICON_FILENAME = "Synchat.ico"
 
-USER_BUBBLE_COLOR_HEX = "#00e676"
-USER_TEXT_COLOR_HEX = "#0d1117"
-AI_BUBBLE_COLOR_HEX = "#21262d"
-AI_TEXT_COLOR_HEX = "#f0f6fc"
-SYSTEM_BUBBLE_COLOR_HEX = "#30363d"
-SYSTEM_TEXT_COLOR_HEX = "#c9d1d9"
-ERROR_BUBBLE_COLOR_HEX = "#f85149"
-ERROR_TEXT_COLOR_HEX = "#ffffff"
-BUBBLE_BORDER_COLOR_HEX = "#30363d"
-TIMESTAMP_COLOR_HEX = "#6e7681"
-CODE_BLOCK_BG_COLOR_HEX = "#161b22"
-
-# --- Path Constants ---
 if getattr(sys, 'frozen', False):
     APP_BASE_DIR = os.path.dirname(sys.executable)
 else:
-    APP_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Project root
+    APP_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-USER_DATA_DIR_NAME = ".ava_pys6_data_p1"
-USER_DATA_DIR = os.path.join(os.path.expanduser("~"), USER_DATA_DIR_NAME)
+    USER_DATA_DIR_NAME = ".ava_pys6_data_p1"
+    USER_DATA_DIR = os.path.join(os.path.expanduser("~"), USER_DATA_DIR_NAME)
 
-ASSETS_DIR_NAME = "assets"
-ASSETS_PATH = os.path.join(APP_BASE_DIR, ASSETS_DIR_NAME)
+    ASSETS_DIR_NAME = "assets"
+    ASSETS_PATH = os.path.join(APP_BASE_DIR, ASSETS_DIR_NAME)
 
-STYLESHEET_FILENAME = "style.qss"
-BUBBLE_STYLESHEET_FILENAME = "bubble_style.qss"
-UI_DIR_NAME = "ui"
-UI_DIR_PATH = os.path.join(APP_BASE_DIR, UI_DIR_NAME)
+    STYLESHEET_FILENAME = "style.qss"
+    BUBBLE_STYLESHEET_FILENAME = "bubble_style.qss"
+    UI_DIR_NAME = "ui"
+    UI_DIR_PATH = os.path.join(APP_BASE_DIR, UI_DIR_NAME)
 
-STYLE_PATHS_TO_CHECK = [
-    os.path.join(APP_BASE_DIR, UI_DIR_NAME, STYLESHEET_FILENAME),  # Check ui/style.qss
-    os.path.join(APP_BASE_DIR, STYLESHEET_FILENAME)  # Check root/style.qss
-]
-BUBBLE_STYLESHEET_PATH = os.path.join(UI_DIR_PATH, BUBBLE_STYLESHEET_FILENAME)
+    STYLE_PATHS_TO_CHECK = [
+    os.path.join(APP_BASE_DIR, UI_DIR_NAME, STYLESHEET_FILENAME),
+    os.path.join(APP_BASE_DIR, STYLESHEET_FILENAME)
+    ]
+    BUBBLE_STYLESHEET_PATH = os.path.join(UI_DIR_PATH, BUBBLE_STYLESHEET_FILENAME)
 
-# --- RAG Specific Constants ---
-RAG_COLLECTIONS_DIR_NAME = "rag_collections"
-RAG_COLLECTIONS_PATH = os.path.join(USER_DATA_DIR, RAG_COLLECTIONS_DIR_NAME)
-GLOBAL_COLLECTION_ID = "global_knowledge"
-RAG_NUM_RESULTS = 5
-RAG_CHUNK_SIZE = 1000
-RAG_CHUNK_OVERLAP = 150
-RAG_MAX_FILE_SIZE_MB = 50
-MAX_SCAN_DEPTH = 5
+    RAG_COLLECTIONS_DIR_NAME = "rag_collections"
+    RAG_COLLECTIONS_PATH = os.path.join(USER_DATA_DIR, RAG_COLLECTIONS_DIR_NAME)
+    GLOBAL_COLLECTION_ID = "global_knowledge"
+    RAG_NUM_RESULTS = 5
+    RAG_CHUNK_SIZE = 1000
+    RAG_CHUNK_OVERLAP = 150
+    RAG_MAX_FILE_SIZE_MB = 50
+    MAX_SCAN_DEPTH = 5
 
 ALLOWED_TEXT_EXTENSIONS = {
-    '.txt', '.md', '.markdown', '.rst',
-    '.py', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env',
-    '.c', '.cpp', '.h', '.hpp', '.java', '.go', '.rs', '.swift', '.php', '.rb',
-    '.pdf', '.docx',
+'.txt', '.md', '.markdown', '.rst',
+'.py', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env',
+'.c', '.cpp', '.h', '.hpp', '.java', '.go', '.rs', '.swift', '.php', '.rb',
+'.pdf', '.docx',
 }
 
 DEFAULT_IGNORED_DIRS = {
-    '.git', '.idea', '__pycache__', 'venv', 'node_modules', 'build', 'dist',
-    '.pytest_cache', '.vscode', '.env', '.DS_Store', 'logs',
+'.git', '.idea', 'pycache', 'venv', 'node_modules', 'build', 'dist',
+'.pytest_cache', '.vscode', '.env', '.DS_Store', 'logs',
 }
-# --- End RAG Specific Constants ---
 
-# --- Logging Constants ---
-LOG_LEVEL = "DEBUG"
+LOG_LEVEL = "INFO"
 LOG_FILE_NAME = "ava_pys6_phase1.log"
 LOG_FORMAT = '%(asctime)s.%(msecs)03d - %(levelname)-8s - [%(name)s:%(module)s.%(funcName)s:%(lineno)d] - %(message)s'
 LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
-# --- End Logging Constants ---
 
-# Ensure user data directory exists (critical for many operations)
 try:
     os.makedirs(USER_DATA_DIR, exist_ok=True)
     logger.info(f"User data directory ensured at: {USER_DATA_DIR}")
 except OSError as e:
     logger.critical(f"CRITICAL: Error creating user data directory in constants.py: {e}", exc_info=True)
-    # Depending on how critical this is at import time, you might raise an error or exit.
-    # For now, just logging critically.

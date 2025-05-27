@@ -1,4 +1,3 @@
-# ui/main_window.py
 import logging
 import os
 import sys
@@ -20,14 +19,13 @@ try:
     from ui.dialog_service import DialogService
     from ui.chat_display_area import ChatDisplayArea
     from ui.chat_input_bar import ChatInputBar
-    from ui.loading_overlay import LoadingOverlay  # NEW: Loading overlay import
+    from ui.loading_overlay import LoadingOverlay
     from utils import constants
     from core.chat_message_state_handler import ChatMessageStateHandler
     from services.project_service import Project, ChatSession
 except ImportError as e_main_window:
-    logging.basicConfig(level=logging.DEBUG)  # Ensure logging is set up for early errors
+    logging.basicConfig(level=logging.DEBUG)
     logging.critical(f"CRITICAL IMPORT ERROR in main_window.py: {e_main_window}", exc_info=True)
-    # Attempt to show a message box if QApplication can be instantiated
     try:
         _dummy_app = QApplication(sys.argv) if QApplication.instance() is None else QApplication.instance()
         QMessageBox.critical(None, "Import Error",
@@ -48,29 +46,27 @@ class MainWindow(QWidget):
             raise TypeError("MainWindow requires a valid ChatManager instance.")
 
         self.chat_manager = chat_manager
-        self._project_manager = chat_manager.get_project_manager()  # Assuming ChatManager provides this
-        self.app_base_path = app_base_path  # For fallback paths if needed
+        self._project_manager = chat_manager.get_project_manager()
+        self.app_base_path = app_base_path
         self._event_bus = EventBus.get_instance()
 
         self.left_panel: Optional[LeftControlPanel] = None
         self.status_label: Optional[QLabel] = None
         self._status_clear_timer: Optional[QTimer] = None
-        self.dialog_service: Optional[DialogService] = None  # DialogService is owned by MainWindow
+        self.dialog_service: Optional[DialogService] = None
         self.active_chat_display_area: Optional[ChatDisplayArea] = None
         self.active_chat_input_bar: Optional[ChatInputBar] = None
         self._chat_message_state_handler: Optional[ChatMessageStateHandler] = None
-        self._loading_overlay: Optional[LoadingOverlay] = None  # NEW: Loading overlay
+        self._loading_overlay: Optional[LoadingOverlay] = None
 
         self._current_base_status_text: str = "Status: Initializing..."
-        self._current_base_status_color: str = "#abb2bf"  # Default color
+        self._current_base_status_color: str = "#abb2bf"
 
         try:
-            # DialogService is instantiated here, owned by MainWindow
             self.dialog_service = DialogService(self, self.chat_manager, self._event_bus)
         except Exception as e_ds:
             logger.critical(f"Failed to initialize DialogService in MainWindow: {e_ds}", exc_info=True)
-            # This is critical, consider how to handle app exit if DialogService fails
-            QApplication.quit()  # Or raise the error
+            QApplication.quit()
             return
 
         self._init_ui()
@@ -78,19 +74,17 @@ class MainWindow(QWidget):
         self._connect_signals_and_event_bus()
         self._connect_project_manager_signals_to_ui()
         self._setup_window_properties()
-        self._init_loading_overlay()  # NEW: Initialize loading overlay
+        self._init_loading_overlay()
         logger.info("MainWindow initialized successfully.")
 
     def _setup_window_properties(self):
-        self.setWindowTitle(constants.APP_NAME)
+        self.setWindowTitle(constants.APP_NAME) # type: ignore
         try:
-            # Robust icon path finding
-            icon_filename = getattr(constants, 'APP_ICON_FILENAME', "Synchat.ico")  # Default if constant missing
+            icon_filename = getattr(constants, 'APP_ICON_FILENAME', "Synchat.ico") # type: ignore
             icon_path_candidates = [
-                os.path.join(constants.ASSETS_PATH, icon_filename),
+                os.path.join(constants.ASSETS_PATH, icon_filename), # type: ignore
                 os.path.join(os.path.dirname(sys.executable), icon_filename) if getattr(sys, 'frozen', False) else "",
-                # For bundled app
-                os.path.join(self.app_base_path, "assets", icon_filename)  # Relative to app_base_path
+                os.path.join(self.app_base_path, "assets", icon_filename)
             ]
             app_icon_path = ""
             for p in icon_path_candidates:
@@ -110,7 +104,6 @@ class MainWindow(QWidget):
         self.update_window_title()
 
     def _init_loading_overlay(self):
-        """Initialize the loading overlay"""
         try:
             self._loading_overlay = LoadingOverlay(parent=self)
             logger.info("Loading overlay initialized successfully")
@@ -119,7 +112,6 @@ class MainWindow(QWidget):
             self._loading_overlay = None
 
     def _init_ui(self):
-        # ... (UI initialization remains largely the same) ...
         main_hbox_layout = QHBoxLayout(self)
         main_hbox_layout.setContentsMargins(0, 0, 0, 0)
         main_hbox_layout.setSpacing(0)
@@ -130,8 +122,8 @@ class MainWindow(QWidget):
         try:
             self.left_panel = LeftControlPanel(chat_manager=self.chat_manager, parent=self)
             self.left_panel.setObjectName("LeftPanel")
-            self.left_panel.setMinimumWidth(260)  # Adjusted min width
-            self.left_panel.setMaximumWidth(400)  # Adjusted max width
+            self.left_panel.setMinimumWidth(260)
+            self.left_panel.setMaximumWidth(400)
         except Exception as e_lcp:
             logger.critical(f"CRITICAL ERROR creating LeftControlPanel: {e_lcp}", exc_info=True)
             QMessageBox.critical(self, "Initialization Error", f"Failed to create Left Panel:\n{e_lcp}")
@@ -141,48 +133,45 @@ class MainWindow(QWidget):
         right_panel_widget = QWidget(self)
         right_panel_widget.setObjectName("RightPanelContainer")
         right_panel_layout = QVBoxLayout(right_panel_widget)
-        right_panel_layout.setContentsMargins(5, 5, 5, 5)  # Standard margins
-        right_panel_layout.setSpacing(5)  # Standard spacing
-        right_panel_widget.setMinimumWidth(450)  # Ensure right panel has enough space
+        right_panel_layout.setContentsMargins(5, 5, 5, 5)
+        right_panel_layout.setSpacing(5)
+        right_panel_widget.setMinimumWidth(450)
 
         self.active_chat_display_area = ChatDisplayArea(parent=right_panel_widget)
-        # Ensure delegate has its view set, if applicable
         if self.active_chat_display_area and self.active_chat_display_area.chat_item_delegate:
             self.active_chat_display_area.chat_item_delegate.setView(self.active_chat_display_area.chat_list_view)
 
         self.active_chat_input_bar = ChatInputBar(parent=right_panel_widget)
 
-        right_panel_layout.addWidget(self.active_chat_display_area, 1)  # Display area takes most space
+        right_panel_layout.addWidget(self.active_chat_display_area, 1)
         right_panel_layout.addWidget(self.active_chat_input_bar)
 
-        status_bar_widget = QWidget(self)  # No parent needed if added to layout
+        status_bar_widget = QWidget(self)
         status_bar_widget.setObjectName("StatusBarWidget")
         status_bar_layout = QHBoxLayout(status_bar_widget)
         status_bar_layout.setContentsMargins(8, 3, 8, 3)
         status_bar_layout.setSpacing(10)
-        self.status_label = QLabel("Status: Initializing...", self)  # Parent self is fine
-        self.status_label.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 2))
+        self.status_label = QLabel("Status: Initializing...", self)
+        self.status_label.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 2)) # type: ignore
         self.status_label.setObjectName("StatusLabel")
-        status_bar_layout.addWidget(self.status_label, 1)  # Stretch factor
+        status_bar_layout.addWidget(self.status_label, 1)
         right_panel_layout.addWidget(status_bar_widget)
 
         main_splitter.addWidget(self.left_panel)
         main_splitter.addWidget(right_panel_widget)
-        main_splitter.setSizes([270, 730])  # Initial sizes, user can adjust
-        main_splitter.setStretchFactor(0, 0)  # Left panel doesn't stretch as much
-        main_splitter.setStretchFactor(1, 1)  # Right panel stretches
+        main_splitter.setSizes([270, 730])
+        main_splitter.setStretchFactor(0, 0)
+        main_splitter.setStretchFactor(1, 1)
         main_hbox_layout.addWidget(main_splitter)
-        self.setLayout(main_hbox_layout)  # Set main layout for MainWindow
+        self.setLayout(main_hbox_layout)
 
-        # Initialize ChatMessageStateHandler, which listens to EventBus for LLM state changes
         self._chat_message_state_handler = ChatMessageStateHandler(self._event_bus, parent=self)
 
     def _apply_styles(self):
-        # ... (remains the same) ...
         logger.debug("MainWindow applying styles...")
         try:
             stylesheet_path = ""
-            for path_candidate in constants.STYLE_PATHS_TO_CHECK:
+            for path_candidate in constants.STYLE_PATHS_TO_CHECK: # type: ignore
                 if os.path.exists(path_candidate):
                     stylesheet_path = path_candidate
                     break
@@ -199,7 +188,6 @@ class MainWindow(QWidget):
             self.setStyleSheet("QWidget { background-color: #333; color: #EEE; }")
 
     def _connect_signals_and_event_bus(self):
-        # ... (remains the same) ...
         if not all([self.chat_manager, self.left_panel, self.dialog_service,
                     self.active_chat_display_area, self.active_chat_input_bar]):
             logger.error("MainWindow: One or more critical UI components are None. Cannot connect signals.")
@@ -210,7 +198,7 @@ class MainWindow(QWidget):
             self.active_chat_input_bar.sendMessageRequested.connect(
                 lambda: bus.userMessageSubmitted.emit(
                     self.active_chat_input_bar.get_text() if self.active_chat_input_bar else "",
-                    self.active_chat_input_bar.get_attached_image_data() if hasattr(self.active_chat_input_bar,
+                    self.active_chat_input_bar.get_attached_image_data() if hasattr(self.active_chat_input_bar, # type: ignore
                                                                                     'get_attached_image_data') else []
                 )
             )
@@ -225,12 +213,10 @@ class MainWindow(QWidget):
         bus.uiInputBarBusyStateChanged.connect(self._handle_input_bar_busy_state_change)
         bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event)
 
-        # NEW: Loading overlay signals
         bus.showLoader.connect(self._show_loading_overlay)
         bus.hideLoader.connect(self._hide_loading_overlay)
         bus.updateLoaderMessage.connect(self._update_loading_message)
 
-        # MainWindow handles showing the code viewer when this signal is emitted
         bus.modificationFileReadyForDisplay.connect(self._handle_code_file_update_event)
 
         bus.newMessageAddedToHistory.connect(self._handle_new_message_added_to_history)
@@ -243,7 +229,6 @@ class MainWindow(QWidget):
         shortcut_escape.activated.connect(self._handle_escape_key_pressed)
 
     def _connect_project_manager_signals_to_ui(self):
-        # ... (remains the same) ...
         if not self._project_manager:
             logger.warning("MW: ProjectManager not available for signal connection.")
             return
@@ -253,10 +238,8 @@ class MainWindow(QWidget):
         self._project_manager.sessionSwitched.connect(self._handle_session_switched_ui_update)
         self._project_manager.projectDeleted.connect(self.update_window_title)
 
-    # NEW: Loading overlay slot methods
     @Slot(str)
     def _show_loading_overlay(self, message: str):
-        """Show the loading overlay with a message"""
         if self._loading_overlay:
             self._loading_overlay.show_loading(message)
             logger.debug(f"Showing loading overlay: {message}")
@@ -265,31 +248,26 @@ class MainWindow(QWidget):
 
     @Slot()
     def _hide_loading_overlay(self):
-        """Hide the loading overlay"""
         if self._loading_overlay:
             self._loading_overlay.hide_loading()
             logger.debug("Hiding loading overlay")
 
     @Slot(str)
     def _update_loading_message(self, message: str):
-        """Update the loading overlay message"""
         if self._loading_overlay and self._loading_overlay.isVisible():
             self._loading_overlay.update_message(message)
             logger.debug(f"Updated loading message: {message}")
 
     @Slot(str, str)
     def _handle_code_file_update_event(self, filename: str, content: str):
-        """Handles the event when a file is ready to be displayed in the code viewer."""
         logger.info(f"MainWindow: Received code update for '{filename}' via EventBus. Delegating to DialogService.")
         if self.dialog_service:
             project_id_context = self.chat_manager.get_current_project_id() if self.chat_manager else None
 
-            # Determine the base directory for "Apply" functionality
-            # This should ideally be the root of the current Ava project's generated files
             focus_prefix_context = None
             if self._project_manager and project_id_context:
                 focus_prefix_context = self._project_manager.get_project_files_dir(project_id_context)
-            else:  # Fallback if no project context
+            else:
                 focus_prefix_context = os.path.join(os.getcwd(), "ava_generated_projects", "unknown_project")
                 os.makedirs(focus_prefix_context, exist_ok=True)
 
@@ -318,8 +296,8 @@ class MainWindow(QWidget):
         logger.info(f"MW: UI Update for session switched (from PM signal): P:{project_id} S:{session_id}")
         self.update_window_title()
 
-    @Slot(str, str, ChatMessage)
-    def _handle_new_message_added_to_history(self, project_id: str, session_id: str, message: ChatMessage):
+    @Slot(str, str, ChatMessage) # type: ignore
+    def _handle_new_message_added_to_history(self, project_id: str, session_id: str, message: ChatMessage): # type: ignore
         current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
         current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
 
@@ -342,19 +320,19 @@ class MainWindow(QWidget):
                 f"MW: activeSessionHistoryCleared for non-active P/S: {project_id}/{session_id}. Ignored by active display.")
 
     @Slot(str, str, list)
-    def _handle_active_session_history_loaded(self, project_id: str, session_id: str, history: List[ChatMessage]):
+    def _handle_active_session_history_loaded(self, project_id: str, session_id: str, history: List[ChatMessage]): # type: ignore
         current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
         current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
 
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
             logger.info(f"MW: Loading history for active session P:{project_id}/S:{session_id} into display area.")
-            self.active_chat_display_area.set_current_context(project_id, session_id)  # Ensure context is set
+            self.active_chat_display_area.set_current_context(project_id, session_id)
             self.active_chat_display_area.load_history_into_model(project_id, session_id, history)
 
             if self._chat_message_state_handler and self.active_chat_display_area.get_model():
                 logger.info(f"MW: Registering model for P:{project_id}/S:{session_id} with ChatMessageStateHandler.")
                 self._chat_message_state_handler.register_model_for_project_session(
-                    project_id, session_id, self.active_chat_display_area.get_model()  # type: ignore
+                    project_id, session_id, self.active_chat_display_area.get_model() # type: ignore
                 )
             else:
                 logger.warning(
@@ -370,9 +348,9 @@ class MainWindow(QWidget):
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
             self.active_chat_display_area.append_chunk_to_message_by_id(request_id, chunk_text)
 
-    @Slot(str, str, str, ChatMessage, dict, bool)
+    @Slot(str, str, str, ChatMessage, dict, bool) # type: ignore
     def _handle_message_finalized_for_session(self, project_id: str, session_id: str, request_id: str,
-                                              final_message_obj: ChatMessage, usage_stats_dict: dict, is_error: bool):
+                                              final_message_obj: ChatMessage, usage_stats_dict: dict, is_error: bool): # type: ignore
         current_pid = self.chat_manager.get_current_project_id() if self.chat_manager else None
         current_sid = self.chat_manager.get_current_session_id() if self.chat_manager else None
         if self.active_chat_display_area and project_id == current_pid and session_id == current_sid:
@@ -387,7 +365,6 @@ class MainWindow(QWidget):
 
         if self._status_clear_timer:
             self._status_clear_timer.stop()
-            # self._status_clear_timer.deleteLater() # deleteLater can be problematic if timer is immediately restarted
             self._status_clear_timer = None
 
         if is_temporary:
@@ -403,9 +380,8 @@ class MainWindow(QWidget):
         self.status_label.setStyleSheet(f"QLabel#StatusLabel {{ color: {self._current_base_status_color}; }}")
 
     def _clear_temporary_status(self):
-        if self._status_clear_timer:  # Check if it still exists (might have been deleted)
+        if self._status_clear_timer:
             self._status_clear_timer.stop()
-            # self._status_clear_timer.deleteLater() # Avoid if re-entrant or quick succession of status updates
             self._status_clear_timer = None
 
         if self.chat_manager:
@@ -415,11 +391,11 @@ class MainWindow(QWidget):
                 self.update_status(f"Ready. Using {model_name}", "#98c379", is_temporary=False)
             else:
                 last_error = "Unknown configuration error"
-                if self.chat_manager._backend_coordinator:  # type: ignore
-                    last_error = self.chat_manager._backend_coordinator.get_last_error_for_backend(  # type: ignore
+                if hasattr(self.chat_manager, '_backend_coordinator') and self.chat_manager._backend_coordinator: # type: ignore
+                    last_error = self.chat_manager._backend_coordinator.get_last_error_for_backend( # type: ignore
                         self.chat_manager.get_current_active_chat_backend_id()) or "Backend config issue"
                 self.update_status(f"Backend not configured: {last_error}", "#FFCC00", is_temporary=False)
-        else:  # Fallback if chat_manager is None
+        else:
             self.update_status("Ready", "#98c379", is_temporary=False)
 
     @Slot(str, bool)
@@ -437,13 +413,13 @@ class MainWindow(QWidget):
             rag_ready = self.chat_manager.is_rag_ready()
             self.left_panel.set_enabled_state(
                 is_api_ready=api_ready,
-                is_busy=is_input_bar_busy,  # Use the direct busy state from input bar
+                is_busy=is_input_bar_busy,
                 is_rag_ready=rag_ready
             )
 
     @Slot(str, str, bool, list)
     def _handle_backend_configuration_changed_event(self, backend_id: str, model_name: str, is_configured: bool,
-                                                    available_models: list):
+                                                    available_models):
         self.update_window_title()
         if self.left_panel and self.chat_manager and backend_id == self.chat_manager.get_current_active_chat_backend_id():
             self.left_panel.update_personality_tooltip(
@@ -456,51 +432,50 @@ class MainWindow(QWidget):
             logger.warning(
                 f"MW: Backend '{backend_id}' not configured for model '{model_name}'. Status updated by ChatManager.")
 
-        # Explicitly update status based on active chat backend config
         if self.chat_manager and backend_id == self.chat_manager.get_current_active_chat_backend_id():
             if is_configured:
                 self.update_status(f"Ready. Using {model_name}", "#98c379", False)
             else:
                 err = "Unknown reason"
-                if self.chat_manager._backend_coordinator:  # type: ignore
-                    err = self.chat_manager._backend_coordinator.get_last_error_for_backend(
-                        backend_id) or "Config error"  # type: ignore
+                if hasattr(self.chat_manager, '_backend_coordinator') and self.chat_manager._backend_coordinator: # type: ignore
+                    err = self.chat_manager._backend_coordinator.get_last_error_for_backend( # type: ignore
+                        backend_id) or "Config error"
                 self.update_status(f"Chat LLM Error: {err}", "#FF6B6B", False)
 
     def _handle_escape_key_pressed(self):
         if self.chat_manager and self.chat_manager.is_overall_busy():
             if hasattr(self.chat_manager,
-                       '_current_llm_request_id') and self.chat_manager._current_llm_request_id:  # type: ignore
-                request_to_cancel = self.chat_manager._current_llm_request_id  # type: ignore
-                if self.chat_manager._backend_coordinator:  # type: ignore
-                    self.chat_manager._backend_coordinator.cancel_current_task(
-                        request_id=request_to_cancel)  # type: ignore
+                       '_current_llm_request_id') and self.chat_manager._current_llm_request_id: # type: ignore
+                request_to_cancel = self.chat_manager._current_llm_request_id # type: ignore
+                if hasattr(self.chat_manager, '_backend_coordinator') and self.chat_manager._backend_coordinator: # type: ignore
+                    self.chat_manager._backend_coordinator.cancel_current_task( # type: ignore
+                        request_id=request_to_cancel)
                     self.update_status("Attempting to cancel AI response...", "#e5c07b", True, 2000)
-            else:  # Generic busy state, try cancelling all for the coordinator
-                if self.chat_manager._backend_coordinator and self.chat_manager._backend_coordinator.is_any_backend_busy():  # type: ignore
-                    self.chat_manager._backend_coordinator.cancel_current_task(None)  # type: ignore # Cancel all
+            else:
+                if hasattr(self.chat_manager, '_backend_coordinator') and self.chat_manager._backend_coordinator and self.chat_manager._backend_coordinator.is_any_backend_busy(): # type: ignore
+                    self.chat_manager._backend_coordinator.cancel_current_task(None) # type: ignore
                     self.update_status("Attempting to cancel ongoing AI tasks...", "#e5c07b", True, 2000)
 
     def update_window_title(self):
-        base_title = constants.APP_NAME
+        base_title = constants.APP_NAME # type: ignore
         details = []
-        current_project: Optional[Project] = None  # type: ignore
-        current_session: Optional[ChatSession] = None  # type: ignore
+        current_project: Optional[Project] = None # type: ignore
+        current_session: Optional[ChatSession] = None # type: ignore
 
         if self._project_manager:
             current_project = self._project_manager.get_current_project()
             current_session = self._project_manager.get_current_session()
 
         if current_project:
-            details.append(f"Project: {current_project.name[:25]}")
+            details.append(f"Project: {current_project.name[:25]}") # type: ignore
         if current_session:
-            details.append(f"Session: {current_session.name[:25]}")
+            details.append(f"Session: {current_session.name[:25]}") # type: ignore
 
         if self.chat_manager:
             active_backend_id = self.chat_manager.get_current_active_chat_backend_id()
             model_name = self.chat_manager.get_model_for_backend(active_backend_id)
             if model_name:
-                model_short = model_name.split('/')[-1].split(':')[-1]  # Basic shortening
+                model_short = model_name.split('/')[-1].split(':')[-1]
                 if "gemini" in model_short: model_short = model_short.replace("-preview-05-20", "").replace("-latest",
                                                                                                             "")
                 details.append(f"LLM: {model_short[:20]}")
@@ -509,18 +484,15 @@ class MainWindow(QWidget):
 
         self.setWindowTitle(f"{base_title} - [{', '.join(details)}]" if details else base_title)
 
-    def resizeEvent(self, event):
-        """Handle window resize events"""
+    def resizeEvent(self, event: QEvent): # type: ignore
         super().resizeEvent(event)
 
-        # NEW: Ensure loading overlay covers the entire window
         if self._loading_overlay and self._loading_overlay.isVisible():
             self._loading_overlay.resize(self.size())
 
     def closeEvent(self, event: QCloseEvent):
         logger.info("MainWindow closeEvent triggered. Performing cleanup...")
 
-        # NEW: Hide loading overlay
         if self._loading_overlay:
             self._loading_overlay.hide_loading()
 
@@ -529,7 +501,6 @@ class MainWindow(QWidget):
         if self.chat_manager and hasattr(self.chat_manager, 'cleanup_phase1'):
             self.chat_manager.cleanup_phase1()
 
-        # Unregister model from ChatMessageStateHandler if conditions are met
         if self._chat_message_state_handler and self.chat_manager:
             pid = self.chat_manager.get_current_project_id()
             sid = self.chat_manager.get_current_session_id()
@@ -540,6 +511,6 @@ class MainWindow(QWidget):
     def showEvent(self, event: QEvent):
         super().showEvent(event)
         if self.active_chat_input_bar:
-            QTimer.singleShot(100, self.active_chat_input_bar.set_focus)  # type: ignore
-        QTimer.singleShot(150, self._clear_temporary_status)  # Initial status clear after show
+            QTimer.singleShot(100, self.active_chat_input_bar.set_focus) # type: ignore
+        QTimer.singleShot(150, self._clear_temporary_status)
         self.update_window_title()
