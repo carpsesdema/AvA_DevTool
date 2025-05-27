@@ -15,7 +15,7 @@ DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:14b" # Your preferred default
 DEFAULT_GPT_CHAT_MODEL = "gpt-3.5-turbo" # Added default for GPT
 
 GENERATOR_BACKEND_ID = "ollama_generator_default"
-DEFAULT_OLLAMA_GENERATOR_MODEL = "devstral:latest"
+DEFAULT_OLLAMA_GENERATOR_MODEL = "devstral:24b"
 
 API_DEVELOPMENT_PROMPT = """You are a backend API development specialist. Follow these guidelines:
 
