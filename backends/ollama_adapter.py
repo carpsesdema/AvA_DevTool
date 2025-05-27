@@ -10,19 +10,18 @@ try:
 
     _ollama_module_present = True
     try:
-        # Attempt to import specific types for better type checking if available
-        from ollama._types import Model as _OllamaModelType  # For model listing
-        from ollama._types import ChatResponse as _OllamaChatResponseType  # For chat stream
+        from ollama._types import Model as _OllamaModelType
+        from ollama._types import ChatResponse as _OllamaChatResponseType
 
         _ollama_types_imported_successfully = True
     except ImportError:
-        _OllamaModelType = object  # Fallback type
-        _OllamaChatResponseType = object  # Fallback type
+        _OllamaModelType = object
+        _OllamaChatResponseType = object
         _ollama_types_imported_successfully = False
         logging.warning("OllamaAdapter: Could not import specific types from ollama._types. Using generic fallbacks.")
     API_LIBRARY_AVAILABLE = True
 except ImportError:
-    ollama = None  # type: ignore
+    ollama = None
     _ollama_module_present = False
     _OllamaModelType = object
     _OllamaChatResponseType = object
@@ -142,9 +141,8 @@ class OllamaAdapter(BackendInterface):
 
         ollama_sync_iterator = None
         try:
-            # Get the synchronous stream iterator by running the initial call in a thread
             def _get_ollama_iterator():
-                return self._sync_client.chat(  # type: ignore
+                return self._sync_client.chat(
                     model=self._model_name,
                     messages=messages_for_api,
                     stream=True,
@@ -157,29 +155,26 @@ class OllamaAdapter(BackendInterface):
             chunk_count = 0
 
             while True:
-                chunk_data_obj: Optional[_OllamaChatResponseType] = None  # type: ignore
+                chunk_data_obj: Optional[_OllamaChatResponseType] = None
                 try:
-                    # Run the blocking next() call in an executor to make it non-blocking for asyncio
                     chunk_data_obj = await loop.run_in_executor(None, next, ollama_sync_iterator)
                     chunk_count += 1
                 except StopIteration:
                     logger.info(
                         f"Ollama stream for '{self._model_name}' ended (StopIteration). Total Chunks: {chunk_count}.")
                     break
-                except Exception as e_next:  # Catch other errors from next()
+                except Exception as e_next:
                     self._last_error = f"Error calling next() on Ollama stream for '{self._model_name}': {type(e_next).__name__} - {e_next}"
                     logger.error(self._last_error, exc_info=True)
                     yield f"[SYSTEM ERROR: {self._last_error}]"
-                    return  # Stop generation
+                    return
 
-                # Process the chunk_data_obj (which should be an instance of ollama._types.ChatResponse or similar)
                 logger.debug(
                     f"Ollama raw chunk obj #{chunk_count} for {self._model_name}: Type {type(chunk_data_obj)}, Content: {str(chunk_data_obj)[:250]}")
 
-                # Access attributes directly from the ChatResponse object
-                chunk_error = getattr(chunk_data_obj, 'error', None)  # Some versions might have error directly
-                if not chunk_error and hasattr(chunk_data_obj, 'message') and chunk_data_obj.message:  # type: ignore
-                    chunk_error = getattr(chunk_data_obj.message, 'error', None)  # type: ignore
+                chunk_error = getattr(chunk_data_obj, 'error', None)
+                if not chunk_error and hasattr(chunk_data_obj, 'message') and chunk_data_obj.message:
+                    chunk_error = getattr(chunk_data_obj.message, 'error', None)
 
                 if chunk_error:
                     self._last_error = f"Ollama Stream Error: {chunk_error}"
@@ -191,9 +186,9 @@ class OllamaAdapter(BackendInterface):
                     return
 
                 content_part = ''
-                if hasattr(chunk_data_obj, 'message') and chunk_data_obj.message:  # type: ignore
-                    if hasattr(chunk_data_obj.message, 'content') and chunk_data_obj.message.content:  # type: ignore
-                        content_part = chunk_data_obj.message.content  # type: ignore
+                if hasattr(chunk_data_obj, 'message') and chunk_data_obj.message:
+                    if hasattr(chunk_data_obj.message, 'content') and chunk_data_obj.message.content:
+                        content_part = chunk_data_obj.message.content
 
                 if content_part:
                     yield content_part
@@ -217,7 +212,7 @@ class OllamaAdapter(BackendInterface):
             logger.error(self._last_error, exc_info=True)
             if not isinstance(e_general, RuntimeError):
                 raise RuntimeError(self._last_error) from e_general
-            else:  # Re-raise original RuntimeError
+            else:
                 raise
 
     def get_available_models(self) -> List[str]:
@@ -225,30 +220,42 @@ class OllamaAdapter(BackendInterface):
         if not API_LIBRARY_AVAILABLE:
             self._last_error = "Ollama library not installed."
             return []
-        if not self.is_configured() or not self._sync_client:
-            self._last_error = "OllamaAdapter not configured. Cannot list models."
-            return []
+
+        # Ensure client is available for listing models, even if not fully configured for a specific model
+        if not self._sync_client:
+            try:
+                logger.info("OllamaAdapter.get_available_models: Attempting to create temporary client for listing.")
+                temp_client = ollama.Client(host=self._ollama_host)
+                temp_client.list()  # Test connection
+                # If successful, we can use this client for this operation
+                # Or, decide if self._sync_client should be set here permanently if it's the first successful connection.
+                # For now, let's use a local client for this call if self._sync_client is None.
+                client_to_use = temp_client
+            except Exception as e_temp_client:
+                self._last_error = f"OllamaAdapter: Failed to establish temporary client for model listing: {e_temp_client}"
+                logger.error(self._last_error, exc_info=True)
+                return []
+        else:
+            client_to_use = self._sync_client
 
         model_names: List[str] = []
         try:
-            models_response_data = self._sync_client.list()
+            models_response_data = client_to_use.list()
             items_to_parse = []
-            # Handle different structures the ollama library might return for list()
             if isinstance(models_response_data, dict) and 'models' in models_response_data:
                 items_to_parse = models_response_data['models']
             elif isinstance(models_response_data, list):
-                items_to_parse = models_response_data  # Older versions might return a list of model objects/dicts
-            # REMOVED THE PROBLEMATIC _OllamaListResponseType CHECK THAT WAS CAUSING THE BUG
+                items_to_parse = models_response_data
 
             for item in items_to_parse:
                 model_id_to_add = None
-                if _ollama_types_imported_successfully and isinstance(item, _OllamaModelType):  # type: ignore
+                if _ollama_types_imported_successfully and isinstance(item, _OllamaModelType):
                     model_id_to_add = getattr(item, 'name', None)
                 elif isinstance(item, dict):
-                    model_id_to_add = item.get('name') or item.get('model')  # Common dict keys
-                elif hasattr(item, 'name') and isinstance(item.name, str):  # Generic object attribute
+                    model_id_to_add = item.get('name') or item.get('model')
+                elif hasattr(item, 'name') and isinstance(item.name, str):
                     model_id_to_add = item.name
-                elif hasattr(item, 'model') and isinstance(item.model, str):  # Fallback for 'model' attribute
+                elif hasattr(item, 'model') and isinstance(item.model, str):
                     model_id_to_add = item.model
 
                 if model_id_to_add and isinstance(model_id_to_add, str):
@@ -256,7 +263,39 @@ class OllamaAdapter(BackendInterface):
                 else:
                     logger.warning(f"Could not extract model name from item: {item} (Type: {type(item)})")
 
-            return sorted(list(set(model_names)))
+            # Sort models, perhaps prioritizing some common ones or by name
+            default_candidates = ["llama3:latest", "codellama:latest", "mistral:latest", "phi3:latest",
+                                  self.DEFAULT_MODEL]
+            combined_list = list(set(model_names + [m for m in default_candidates if m not in model_names]))
+
+            def sort_key_ollama(model_name: str):
+                name_lower = model_name.lower()
+                is_latest = "latest" in name_lower
+                is_default = model_name == self.DEFAULT_MODEL
+                # Prioritize common model families
+                priority = 5
+                if "llama3" in name_lower:
+                    priority = 0
+                elif "codellama" in name_lower:
+                    priority = 1
+                elif "mistral" in name_lower:
+                    priority = 2
+                elif "phi3" in name_lower:
+                    priority = 3
+                elif "qwen" in name_lower:
+                    priority = 4
+
+                return (0 if is_default else 1, 0 if is_latest else 1, priority, name_lower)
+
+            final_model_list = sorted(combined_list, key=sort_key_ollama)
+
+            # Ensure the currently configured model (if any) is in the list and preferably first
+            if self._model_name and self._is_configured and self._model_name not in final_model_list:
+                final_model_list.insert(0, self._model_name)
+                final_model_list.sort(key=sort_key_ollama)  # Re-sort after adding current
+
+            return final_model_list
+
         except ollama.RequestError as e_req:
             self._last_error = f"Ollama API Request Error (listing models): {e_req}. Is Ollama server running at {self._ollama_host}?"
             logger.error(self._last_error, exc_info=True)
@@ -309,7 +348,7 @@ class OllamaAdapter(BackendInterface):
 
             if "content" in message_payload or "images" in message_payload:
                 ollama_messages.append(message_payload)
-            elif role_for_api == "system":  # Allow system message even if content/images are empty (e.g. role only)
+            elif role_for_api == "system":
                 logger.debug(f"OllamaAdapter: Adding system message (role only) for {self._model_name}")
                 ollama_messages.append(message_payload)
         return ollama_messages
