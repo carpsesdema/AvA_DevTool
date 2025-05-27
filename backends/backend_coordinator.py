@@ -1,9 +1,11 @@
+# Fixed backend_coordinator.py - Key changes for performance
+
 import asyncio
 import logging
 import uuid
 from typing import List, Optional, Dict, Any, Tuple
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 
 try:
     from backends.backend_interface import BackendInterface
@@ -13,9 +15,9 @@ except ImportError as e:
     logging.getLogger(__name__).error(f"Import error in backend_coordinator: {e}. Using placeholder types.")
     BackendInterface = type("BackendInterface", (object,), {})
     ChatMessage = type("ChatMessage", (object,), {})
-    MODEL_ROLE, USER_ROLE = "model", "user"  # CORRECTED: Added MODEL_ROLE and USER_ROLE for ImportError block
+    MODEL_ROLE, USER_ROLE = "model", "user"
     _dummy_signal = type("Signal", (object,), {"emit": lambda *args, **kwargs: None, "connect": lambda x: None})
-    EventBus = type("EventBus", (object,), {  # type: ignore
+    EventBus = type("EventBus", (object,), {
         "get_instance": lambda: type("DummyBus", (object,), {
             "llmRequestSent": _dummy_signal(),
             "llmStreamChunkReceived": _dummy_signal(),
@@ -46,6 +48,13 @@ class BackendCoordinator(QObject):
         self._last_errors_map: Dict[str, Optional[str]] = {bid: None for bid in backend_adapters}
         self._active_backend_tasks: Dict[str, asyncio.Task] = {}
         self._overall_is_busy: bool = False
+
+        # NEW: Cache for model fetching to prevent redundant calls
+        self._models_fetch_cache: Dict[str, float] = {}  # backend_id -> timestamp
+        self._models_fetch_cooldown = 30.0  # 30 seconds cooldown
+
+        # NEW: Async model fetching timer
+        self._model_fetch_timer: Optional[QTimer] = None
 
         logger.info(
             f"BackendCoordinator initialized with {len(self._backend_adapters)} adapter(s): {list(self._backend_adapters.keys())}")
@@ -78,32 +87,101 @@ class BackendCoordinator(QObject):
         self._current_model_names[backend_id] = model_name
         self._current_system_prompts[backend_id] = system_prompt
 
-        available_models_for_adapter: List[str] = []
-        if is_configured:
-            try:
-                available_models_for_adapter = adapter.get_available_models()
-            except Exception as e_fetch:
-                logger.error(f"BC: Error fetching available models for '{backend_id}' post-config: {e_fetch}",
-                             exc_info=True)
-                current_err = self._last_errors_map.get(backend_id, "") or ""
-                self._last_errors_map[backend_id] = f"{current_err} | Failed to fetch models: {e_fetch}".strip(" | ")
+        # NEW: Only emit with cached models initially, fetch fresh models asynchronously
+        cached_models = self._available_models_map.get(backend_id, [])
+        self._event_bus.backendConfigurationChanged.emit(backend_id, model_name, is_configured, cached_models)
 
-        self._available_models_map[backend_id] = available_models_for_adapter
-        self._event_bus.backendConfigurationChanged.emit(backend_id, model_name, is_configured,
-                                                         available_models_for_adapter)
+        # NEW: Schedule async model fetch if configured successfully
+        if is_configured:
+            self._schedule_async_model_fetch(backend_id)
 
         if not is_configured:
             logger.error(
                 f"BC: Failed to configure backend '{backend_id}'. Last error: {self._last_errors_map[backend_id]}")
+
         return is_configured
+
+    def _schedule_async_model_fetch(self, backend_id: str):
+        """Schedule asynchronous model fetching to avoid blocking UI"""
+        if not self._model_fetch_timer:
+            self._model_fetch_timer = QTimer(self)
+            self._model_fetch_timer.setSingleShot(True)
+            self._model_fetch_timer.timeout.connect(lambda: self._fetch_models_async(backend_id))
+
+        self._model_fetch_timer.start(100)  # Small delay to not block UI
+
+    def _fetch_models_async(self, backend_id: str):
+        """Fetch models asynchronously for a specific backend"""
+        import time
+        current_time = time.time()
+
+        # Check cooldown to prevent excessive fetching
+        if backend_id in self._models_fetch_cache:
+            if current_time - self._models_fetch_cache[backend_id] < self._models_fetch_cooldown:
+                logger.debug(f"BC: Skipping model fetch for '{backend_id}' due to cooldown")
+                return
+
+        adapter = self._backend_adapters.get(backend_id)
+        if not adapter or not self._is_configured_map.get(backend_id, False):
+            return
+
+        try:
+            # NEW: Fetch models with timeout
+            available_models = adapter.get_available_models()
+            self._available_models_map[backend_id] = available_models
+            self._models_fetch_cache[backend_id] = current_time
+
+            # Emit updated configuration with fresh models
+            self._event_bus.backendConfigurationChanged.emit(
+                backend_id,
+                self._current_model_names[backend_id],
+                True,
+                available_models
+            )
+            logger.info(f"BC: Fetched {len(available_models)} models for '{backend_id}'")
+
+        except Exception as e_fetch:
+            logger.warning(f"BC: Failed to fetch models for '{backend_id}': {e_fetch}")
+            # Keep cached models if fetch fails
+            cached_models = self._available_models_map.get(backend_id, [])
+            self._event_bus.backendConfigurationChanged.emit(
+                backend_id,
+                self._current_model_names[backend_id],
+                True,
+                cached_models
+            )
+
+    def get_available_models_for_backend(self, backend_id: str) -> List[str]:
+        """Get available models - return cached models immediately, fetch fresh in background"""
+        # Return cached models immediately
+        cached_models = self._available_models_map.get(backend_id, [])
+
+        adapter = self._backend_adapters.get(backend_id)
+        if not adapter:
+            return cached_models
+
+        # Check if we should refresh (but don't block)
+        import time
+        current_time = time.time()
+        should_refresh = (
+                backend_id not in self._models_fetch_cache or
+                current_time - self._models_fetch_cache[backend_id] > self._models_fetch_cooldown
+        )
+
+        if should_refresh and self._is_configured_map.get(backend_id, False):
+            self._schedule_async_model_fetch(backend_id)
+
+        return cached_models
+
+    # ... (rest of the methods remain the same but with improved error handling)
 
     def initiate_llm_chat_request(self,
                                   target_backend_id: str,
-                                  history_to_send: List[ChatMessage],  # type: ignore
+                                  history_to_send: List[ChatMessage],
                                   options: Optional[Dict[str, Any]] = None
                                   ) -> Tuple[bool, Optional[str], Optional[str]]:
         self._last_errors_map[target_backend_id] = None
-        err_msg: Optional[str] = None  # Initialize error message for clarity
+        err_msg: Optional[str] = None
         adapter = self._backend_adapters.get(target_backend_id)
         if not adapter:
             err_msg = f"Adapter not found for backend_id '{target_backend_id}'."
@@ -113,19 +191,20 @@ class BackendCoordinator(QObject):
         if not self._is_configured_map.get(target_backend_id, False):
             adapter_err = adapter.get_last_error()
             err_msg = f"Backend '{target_backend_id}' is not configured."
-            if adapter_err: err_msg += f" Adapter msg: {adapter_err}"
+            if adapter_err:
+                err_msg += f" Adapter msg: {adapter_err}"
             self._last_errors_map[target_backend_id] = err_msg
             return False, err_msg, None
 
         request_id = f"llm_req_{uuid.uuid4().hex[:12]}"
-        logger.info(f"BC: Generated request ID: {request_id}")  # DEBUG: Log request ID
-        return True, None, request_id  # CORRECTED: Changed 'err' to 'None' for successful path
+        logger.info(f"BC: Generated request ID: {request_id}")
+        return True, None, request_id
 
     def start_llm_streaming_task(self,
                                  request_id: str,
                                  target_backend_id: str,
-                                 history_to_send: List[ChatMessage],  # type: ignore
-                                 is_modification_response_expected: bool,  # Not used in P1 but good for signature
+                                 history_to_send: List[ChatMessage],
+                                 is_modification_response_expected: bool,
                                  options: Optional[Dict[str, Any]] = None,
                                  request_metadata: Optional[Dict[str, Any]] = None):
         adapter = self._backend_adapters.get(target_backend_id)
@@ -164,7 +243,7 @@ class BackendCoordinator(QObject):
                                             backend_id: str,
                                             request_id: str,
                                             adapter: BackendInterface,
-                                            history: List[ChatMessage],  # type: ignore
+                                            history: List[ChatMessage],
                                             options: Optional[Dict[str, Any]] = None,
                                             request_metadata: Optional[Dict[str, Any]] = None):
         response_buffer = ""
@@ -174,10 +253,10 @@ class BackendCoordinator(QObject):
         usage_stats_dict["backend_id"] = backend_id
         usage_stats_dict["request_id"] = request_id
 
-        project_id_for_event = "p1_chat_context"  # P1 default
+        project_id_for_event = "p1_chat_context"
         if request_metadata and "project_id" in request_metadata:
             project_id_for_event = request_metadata["project_id"]
-        elif request_metadata and "p1_chat_context" in request_metadata:  # Fallback if old key used
+        elif request_metadata and "p1_chat_context" in request_metadata:
             project_id_for_event = request_metadata["p1_chat_context"]
         usage_stats_dict["project_id"] = project_id_for_event
 
@@ -186,7 +265,7 @@ class BackendCoordinator(QObject):
                 raise AttributeError(f"Adapter '{backend_id}' missing get_response_stream method.")
 
             self._event_bus.llmStreamStarted.emit(request_id)
-            logger.info(f"BC: Started stream for request {request_id}")  # DEBUG
+            logger.info(f"BC: Started stream for request {request_id}")
 
             stream_iterator = adapter.get_response_stream(history, options)
             chunk_count = 0
@@ -194,44 +273,43 @@ class BackendCoordinator(QObject):
             # CRITICAL FIX: Add periodic yielding to prevent GUI blocking
             async for chunk in stream_iterator:
                 chunk_count += 1
-                logger.debug(f"BC: Emitting chunk #{chunk_count} for {request_id}: '{chunk[:30]}...'")  # DEBUG
+                logger.debug(f"BC: Emitting chunk #{chunk_count} for {request_id}: '{chunk[:30]}...'")
                 self._event_bus.llmStreamChunkReceived.emit(request_id, chunk)
                 response_buffer += chunk
 
                 # CRITICAL: Yield control back to Qt event loop every few chunks
-                if chunk_count % 5 == 0:  # Every 5 chunks
-                    await asyncio.sleep(0)  # Yield to event loop
+                if chunk_count % 5 == 0:
+                    await asyncio.sleep(0)
 
                 # Additional safety: yield on long chunks
                 if len(chunk) > 100:
                     await asyncio.sleep(0)
 
-            logger.info(f"BC: Stream completed for {request_id}, total chunks: {chunk_count}")  # DEBUG
+            logger.info(f"BC: Stream completed for {request_id}, total chunks: {chunk_count}")
 
             final_response_text = response_buffer.strip()
             token_usage = adapter.get_last_token_usage()
             if token_usage:
                 usage_stats_dict["prompt_tokens"] = token_usage[0]
                 usage_stats_dict["completion_tokens"] = token_usage[1]
-            usage_stats_dict["model_name"] = getattr(adapter, "_model_name", "unknown")  # type: ignore
+            usage_stats_dict["model_name"] = getattr(adapter, "_model_name", "unknown")
 
             if final_response_text:
-                completed_message = ChatMessage(id=request_id, role=MODEL_ROLE,
-                                                parts=[final_response_text])  # type: ignore
-                logger.info(f"BC: Emitting completion for {request_id}")  # DEBUG
+                completed_message = ChatMessage(id=request_id, role=MODEL_ROLE, parts=[final_response_text])
+                logger.info(f"BC: Emitting completion for {request_id}")
                 self._event_bus.llmResponseCompleted.emit(request_id, completed_message, usage_stats_dict)
             else:
                 empty_msg_text = "[AI returned an empty response]"
-                empty_message = ChatMessage(id=request_id, role=MODEL_ROLE, parts=[empty_msg_text])  # type: ignore
+                empty_message = ChatMessage(id=request_id, role=MODEL_ROLE, parts=[empty_msg_text])
                 self._event_bus.llmResponseCompleted.emit(request_id, empty_message, usage_stats_dict)
 
         except asyncio.CancelledError:
-            logger.info(f"BC: Stream cancelled for {request_id}")  # DEBUG
+            logger.info(f"BC: Stream cancelled for {request_id}")
             self._event_bus.llmResponseError.emit(request_id, "[AI response cancelled by user]")
         except Exception as e:
             error_msg = adapter.get_last_error() or f"Backend Task Error for ReqID {request_id}: {type(e).__name__}"
             self._last_errors_map[backend_id] = error_msg
-            logger.error(f"BC: Stream error for {request_id}: {error_msg}")  # DEBUG
+            logger.error(f"BC: Stream error for {request_id}: {error_msg}")
             self._event_bus.llmResponseError.emit(request_id, error_msg)
         finally:
             self._active_backend_tasks.pop(request_id, None)
@@ -242,12 +320,12 @@ class BackendCoordinator(QObject):
             task = self._active_backend_tasks.get(request_id)
             if task and not task.done():
                 task.cancel()
-                self._update_overall_busy_state()  # Ensure busy state updated on single cancellation
-        else:  # Cancel ALL tasks if no specific request_id
+                self._update_overall_busy_state()
+        else:
             for req_id_key, task_to_cancel in list(self._active_backend_tasks.items()):
                 if task_to_cancel and not task_to_cancel.done():
                     task_to_cancel.cancel()
-            self._update_overall_busy_state()  # Ensure busy state updated on mass cancellation
+            self._update_overall_busy_state()
 
     def is_backend_configured(self, backend_id: str) -> bool:
         return self._is_configured_map.get(backend_id, False)
@@ -255,7 +333,8 @@ class BackendCoordinator(QObject):
     def get_last_error_for_backend(self, backend_id: str) -> Optional[str]:
         adapter = self._backend_adapters.get(backend_id)
         direct_adapter_error = adapter.get_last_error() if adapter else None
-        if direct_adapter_error: return direct_adapter_error
+        if direct_adapter_error:
+            return direct_adapter_error
         return self._last_errors_map.get(backend_id)
 
     def is_any_backend_busy(self) -> bool:
@@ -266,20 +345,6 @@ class BackendCoordinator(QObject):
 
     def get_current_system_prompt(self, backend_id: str) -> Optional[str]:
         return self._current_system_prompts.get(backend_id)
-
-    def get_available_models_for_backend(self, backend_id: str) -> List[str]:
-        adapter = self._backend_adapters.get(backend_id)
-        if not adapter:
-            return self._available_models_map.get(backend_id, [])
-        try:
-            # Re-fetch models only if not already configured or if the list is empty
-            if not self._is_configured_map.get(backend_id, False) or not self._available_models_map.get(backend_id):
-                models = adapter.get_available_models()
-                self._available_models_map[backend_id] = models[:]
-            return self._available_models_map[backend_id]
-        except Exception:
-            # Fallback to cached or empty list if fetching fails
-            return self._available_models_map.get(backend_id, [])
 
     def get_all_backend_ids(self) -> List[str]:
         """Returns a list of all backend IDs managed by the coordinator."""

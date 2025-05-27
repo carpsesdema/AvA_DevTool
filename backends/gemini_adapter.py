@@ -336,7 +336,7 @@ class GeminiAdapter(BackendInterface):
         return gemini_history
 
     def get_available_models(self) -> List[str]:
-        # ... (remains the same as the last correct version) ...
+        """Get available models with timeout protection"""
         self._last_error = None
         if not API_LIBRARY_AVAILABLE:
             self._last_error = "Gemini API library (google-generativeai) not installed."
@@ -345,38 +345,56 @@ class GeminiAdapter(BackendInterface):
         fetched_models_ids: List[str] = []
         try:
             if not self._is_configured:
-                logger.warning(
-                    "GeminiAdapter.get_available_models called before adapter is configured. API key might not be set for genai library.")
+                logger.warning("GeminiAdapter.get_available_models called before adapter is configured.")
 
-            for model_info in genai.list_models():
-                if hasattr(model_info, 'supported_generation_methods') and \
-                        'generateContent' in model_info.supported_generation_methods and \
-                        hasattr(model_info, 'name') and "gemini" in model_info.name.lower():
-                    fetched_models_ids.append(model_info.name)
+            # NEW: Use threading for timeout protection
+            import threading
+            import queue
+
+            result_queue = queue.Queue()
+            exception_queue = queue.Queue()
+
+            def fetch_models():
+                try:
+                    models = []
+                    for model_info in genai.list_models():
+                        if (hasattr(model_info, 'supported_generation_methods') and
+                                'generateContent' in model_info.supported_generation_methods and
+                                hasattr(model_info, 'name') and "gemini" in model_info.name.lower()):
+                            models.append(model_info.name)
+                    result_queue.put(models)
+                except Exception as e:
+                    exception_queue.put(e)
+
+            fetch_thread = threading.Thread(target=fetch_models)
+            fetch_thread.daemon = True
+            fetch_thread.start()
+            fetch_thread.join(timeout=5.0)  # 5 second timeout for Gemini
+
+            if fetch_thread.is_alive():
+                logger.warning("Gemini model fetch timed out")
+                fetched_models_ids = []
+            elif not exception_queue.empty():
+                raise exception_queue.get()
+            elif not result_queue.empty():
+                fetched_models_ids = result_queue.get()
+
         except PermissionDenied as pde:
-            self._last_error = f"Gemini API Permission Denied listing models: {pde}. Check API key validity and access permissions."
-            logger.error(self._last_error, exc_info=True)
-            return []
-        except InvalidArgument as iae:
-            self._last_error = f"Gemini API Invalid Argument listing models: {iae}."
-            logger.error(self._last_error, exc_info=True)
-            return []
-        except GoogleAPIError as api_err:
-            self._last_error = f"Google API Error listing models: {type(api_err).__name__} - {api_err}"
-            logger.error(self._last_error, exc_info=True)
+            self._last_error = f"Gemini API Permission Denied: {pde}. Check API key."
+            logger.error(self._last_error)
             return []
         except Exception as e:
-            self._last_error = f"Unexpected error fetching Gemini models: {type(e).__name__} - {e}"
-            logger.error(self._last_error, exc_info=True)
-            return []
+            self._last_error = f"Error fetching Gemini models: {type(e).__name__} - {e}"
+            logger.warning(self._last_error)
 
+        # Always provide defaults even if fetch failed
         default_candidates = [
             "models/gemini-1.5-pro-latest", "models/gemini-1.5-flash-latest",
-            "models/gemini-pro",
-            "models/gemini-1.0-pro",
+            "models/gemini-pro", "models/gemini-1.0-pro",
         ]
         combined_list = list(set(fetched_models_ids + default_candidates))
 
+        # Keep your existing sorting logic
         def sort_key_gemini(model_name: str):
             name_lower = model_name.lower()
             is_latest = "latest" in name_lower
@@ -397,7 +415,6 @@ class GeminiAdapter(BackendInterface):
             final_model_list.sort(key=sort_key_gemini)
 
         return final_model_list
-
     def get_last_token_usage(self) -> Optional[Tuple[int, int]]:
         if self._last_prompt_tokens is not None and self._last_completion_tokens is not None:
             return (self._last_prompt_tokens, self._last_completion_tokens)

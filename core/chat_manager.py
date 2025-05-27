@@ -91,12 +91,22 @@ class ChatManager(QObject):
         logger.info("ChatManager initialized and subscriptions connected.")
 
     def initialize(self):
+        """Delayed initialization to avoid blocking startup"""
         logger.info("ChatManager late initialization...")
-        self._configure_backend(self._active_chat_backend_id, self._active_chat_model_name,
-                                self._active_chat_personality_prompt)
-        self._configure_backend(self._active_specialized_backend_id, self._active_specialized_model_name,
-                                constants.CODER_AI_SYSTEM_PROMPT)
-        self._check_rag_readiness_and_emit_status()
+
+        # NEW: Use timer to delay backend configuration to avoid blocking UI
+        from PySide6.QtCore import QTimer
+
+        def configure_backends():
+            logger.info("ChatManager: Configuring backends asynchronously...")
+            self._configure_backend(self._active_chat_backend_id, self._active_chat_model_name,
+                                    self._active_chat_personality_prompt)
+            self._configure_backend(self._active_specialized_backend_id, self._active_specialized_model_name,
+                                    constants.CODER_AI_SYSTEM_PROMPT)
+            self._check_rag_readiness_and_emit_status()
+
+        # Configure backends after a short delay
+        QTimer.singleShot(300, configure_backends)
 
     def set_active_session(self, project_id: str, session_id: str, history: List[ChatMessage]):
         logger.info(f"CM: Setting active session to P:{project_id}/S:{session_id}. History items: {len(history)}")
@@ -157,8 +167,9 @@ class ChatManager(QObject):
             logger.info(f"LLM_COMM_LOG_FALLBACK: [{sender}] {message[:150]}...")
 
     def _configure_backend(self, backend_id: str, model_name: str, system_prompt: Optional[str]):
+        """Configure backend without blocking UI"""
         logger.info(f"CM: Configuring backend '{backend_id}' with model '{model_name}'")
-        self._event_bus.showLoader.emit(f"Configuring {model_name}...")
+
         try:
             api_key_to_use: Optional[str] = None
             actual_system_prompt = system_prompt
@@ -170,7 +181,7 @@ class ChatManager(QObject):
             elif backend_id == "gpt_chat_default":
                 api_key_to_use = get_openai_api_key()
             elif backend_id in [constants.GENERATOR_BACKEND_ID, "ollama_chat_default"]:
-                api_key_to_use = None  # Ollama doesn't use API keys in the same way
+                api_key_to_use = None  # Ollama doesn't use API keys
 
             if backend_id in ["gemini_chat_default", "gpt_chat_default"] and not api_key_to_use:
                 err_msg = f"{backend_id.split('_')[0].upper()} API Key not found. Set in .env"
@@ -181,13 +192,15 @@ class ChatManager(QObject):
                     self._is_specialized_backend_configured = False
                 self._event_bus.backendConfigurationChanged.emit(backend_id, model_name, False, [])
                 self._emit_status_update(err_msg, "#FF6B6B")
-                # self._event_bus.hideLoader.emit() # Already handled by finally
                 return
 
+            # Configure backend (this will now be non-blocking due to our backend coordinator fixes)
             self._backend_coordinator.configure_backend(backend_id=backend_id, api_key=api_key_to_use,
                                                         model_name=model_name, system_prompt=actual_system_prompt)
-        finally:
-            self._event_bus.hideLoader.emit()
+
+        except Exception as e:
+            logger.error(f"CM: Error configuring backend '{backend_id}': {e}", exc_info=True)
+            self._emit_status_update(f"Failed to configure {backend_id}: {e}", "#FF6B6B")
 
     def _detect_file_creation_intent(self, user_text: str) -> Optional[str]:
         """Detect if user wants to create a specific file and return the filename"""
