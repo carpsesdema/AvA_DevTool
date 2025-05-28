@@ -26,7 +26,7 @@ class ProcessedInput:
 
 class UserInputHandler:
     def __init__(self):
-        logger.info("UserInputHandler initialized.")
+        logger.info("UserInputHandler initialized with enhanced detection logic.")
 
         # EXPANDED: More comprehensive keywords for plan-then-code
         self.plan_then_code_keywords = [
@@ -104,27 +104,68 @@ class UserInputHandler:
         return None
 
     def _is_plan_then_code_request(self, user_text: str) -> bool:
-        """Determine if this is a plan-then-code request"""
+        """ENHANCED: Determine if this is a plan-then-code request"""
         lower_text = user_text.lower()
 
-        # First check for explicit single file patterns - these should NOT trigger plan-then-code
-        if self._is_single_file_request(user_text):
+        # CRITICAL FIX: Check for project complexity indicators FIRST
+        # These override single file patterns and are the key to fixing your issue
+        complexity_indicators = [
+            # Tool/utility names that suggest complexity
+            "file organizer", "organizer", "manager", "system", "application",
+            "tool", "utility", "program", "solution", "framework", "analyzer",
+            "processor", "generator", "converter", "parser", "scraper", "crawler",
+            "scheduler", "monitor", "tracker", "validator", "optimizer", "calculator",
+            "compiler", "interpreter", "emulator", "simulator", "installer",
+
+            # Technical complexity
+            "with database", "with api", "with frontend", "with backend",
+            "with gui", "with interface", "with tests", "with documentation",
+            "full stack", "end to end", "complete system", "robust", "comprehensive",
+            "production ready", "enterprise", "scalable", "distributed",
+
+            # Project scope indicators
+            "multi-file", "multiple files", "project structure", "architecture",
+            "full project", "complete solution", "entire system", "whole application"
+        ]
+
+        for indicator in complexity_indicators:
+            if indicator in lower_text:
+                logger.info(f"Found complexity indicator '{indicator}' - routing to plan-then-code")
+                return True
+
+        # If it looks like a single file request, check if it's actually complex
+        if self._looks_like_single_file_initially(user_text):
+            # Check if the "single file" request actually describes something complex
+            complex_descriptors = [
+                "organizer", "manager", "analyzer", "processor", "generator",
+                "converter", "parser", "scraper", "crawler", "scheduler",
+                "monitor", "tracker", "validator", "optimizer", "calculator",
+                "compiler", "interpreter", "dashboard", "interface", "viewer"
+            ]
+
+            for descriptor in complex_descriptors:
+                if descriptor in lower_text:
+                    logger.info(
+                        f"Single file request with complex descriptor '{descriptor}' - upgrading to plan-then-code")
+                    return True
+
+            # If it's truly simple, return False (will be handled as single file)
             return False
 
-        # Check for plan-then-code keywords
+        # Check for explicit plan-then-code keywords
         for keyword in self.plan_then_code_keywords:
             if keyword in lower_text:
                 # Additional check: if it's a simple single function/class request, don't trigger plan-then-code
                 simple_patterns = [
-                    "write a function", "create a function", "make a function",
-                    "write a class", "create a class", "make a class"
+                    "write a simple function", "create a quick function", "make a small function",
+                    "write a basic class", "create a simple class", "make a basic class"
                 ]
 
                 # If it matches a keyword but is asking for just one simple thing, check context
                 if any(simple in lower_text for simple in simple_patterns):
                     # If they mention multiple files or complex structure, still do plan-then-code
-                    complex_indicators = ["multiple", "several", "project", "application", "system"]
-                    if not any(indicator in lower_text for indicator in complex_indicators):
+                    override_indicators = ["multiple", "several", "project", "application", "system"]
+                    if not any(indicator in lower_text for indicator in override_indicators):
                         return False
 
                 return True
@@ -134,71 +175,101 @@ class UserInputHandler:
             "multiple files", "several files", "project structure", "application",
             "system", "framework", "architecture", "scaffold", "bootstrap",
             "full project", "complete solution", "entire", "whole project",
-            "web app", "desktop app", "cli tool", "command line tool"
+            "web app", "desktop app", "cli tool", "command line tool",
+            "microservice", "api server", "web service", "backend service"
         ]
 
         for indicator in multi_file_indicators:
             if indicator in lower_text:
                 return True
 
-        # NEW: Also check for complexity indicators that suggest multi-file needs
-        complexity_indicators = [
-            "with database", "with api", "with frontend", "with backend",
-            "with gui", "with interface", "with tests", "with documentation",
-            "full stack", "end to end", "complete system"
-        ]
-
-        for indicator in complexity_indicators:
-            if indicator in lower_text:
-                return True
-
         return False
 
-    def _is_single_file_request(self, user_text: str) -> bool:
-        """Determine if this is a single file creation request"""
+    def _looks_like_single_file_initially(self, user_text: str) -> bool:
+        """Helper to check if something initially looks like single file (before complexity check)"""
         lower_text = user_text.lower()
 
-        # Check for single file keywords
+        single_file_phrases = [
+            "create a script", "write a script", "make a script",
+            "create a file", "write a file", "make a file",
+            "create a function", "write a function", "make a function",
+            "create a class", "write a class", "make a class"
+        ]
+
+        return any(phrase in lower_text for phrase in single_file_phrases)
+
+    def _is_single_file_request(self, user_text: str) -> bool:
+        """ENHANCED: Determine if this is a single file creation request"""
+        lower_text = user_text.lower()
+
+        # CRITICAL: Don't treat complex requests as single file
+        # Check for complexity first - this prevents the bug you experienced
+        complex_indicators = [
+            "organizer", "manager", "system", "application", "analyzer",
+            "processor", "generator", "converter", "parser", "scraper",
+            "comprehensive", "complete", "full", "robust", "advanced",
+            "enterprise", "production", "scalable", "framework", "library",
+            "dashboard", "interface", "viewer", "monitor", "tracker"
+        ]
+
+        for indicator in complex_indicators:
+            if indicator in lower_text:
+                # This is too complex for single file
+                logger.info(f"Request contains complex indicator '{indicator}' - not treating as single file")
+                return False
+
+        # Check for explicit single file keywords
         for keyword in self.single_file_keywords:
             if keyword in lower_text:
+                logger.info(f"Found single file keyword '{keyword}'")
                 return True
 
         # If a specific filename is mentioned, it's likely a single file request
         if self._detect_file_creation_intent(user_text):
             return True
 
-        # NEW: Check for simple code requests that should be single files
+        # Check for simple code requests that should be single files
         simple_code_patterns = [
-            "write a function", "create a function", "make a function",
-            "write a class", "create a class", "make a class",
-            "write a script", "create a script", "make a script",
-            "simple function", "quick function", "small function",
-            "simple class", "quick class", "small class",
+            "write a simple function", "create a quick function", "make a small function",
+            "write a basic function", "create a basic function", "make a basic function",
+            "simple function", "quick function", "small function", "basic function",
+            "write a simple class", "create a quick class", "make a small class",
+            "write a basic class", "create a basic class", "make a basic class",
+            "simple class", "quick class", "small class", "basic class",
             "just a function", "only a function", "one function",
             "just a class", "only a class", "one class"
         ]
 
         for pattern in simple_code_patterns:
             if pattern in lower_text:
-                # But if they mention complexity, still might be multi-file
+                # Make sure it doesn't have complexity indicators
                 complexity_words = ["with database", "with api", "multiple", "complex", "system", "application"]
                 if not any(complex_word in lower_text for complex_word in complexity_words):
+                    logger.info(f"Found simple code pattern '{pattern}' with no complexity")
+                    return True
+
+        # ENHANCED: Simple script patterns - but only if truly simple
+        simple_script_patterns = ["write a simple script", "create a quick script", "make a small script"]
+        for pattern in simple_script_patterns:
+            if pattern in lower_text:
+                # Only treat as single file if it's truly simple
+                if not any(indicator in lower_text for indicator in complex_indicators):
+                    logger.info(f"Found simple script pattern '{pattern}' with no complexity")
                     return True
 
         return False
 
     def process_input(self, user_text: str, image_data: Optional[List[Dict[str, Any]]] = None) -> ProcessedInput:
-        logger.debug(f"UserInputHandler processing text: '{user_text[:50]}...'")
+        logger.info(f"UserInputHandler processing: '{user_text[:100]}...'")
 
-        lower_user_text = user_text.lower()
+        # FIXED PRIORITY ORDER: This is the key fix for your issue
 
-        # First, check for file creation intent
+        # 1. First, check for explicit filename creation
         detected_filename = self._detect_file_creation_intent(user_text)
 
-        # NEW: Better logic for determining intent priority
         if detected_filename:
-            # If we detect a filename, it's definitely file creation
-            logger.info(f"Detected FILE_CREATION_REQUEST for file: {detected_filename}")
+            # Explicit filename mentioned (e.g., "create file_organizer.py")
+            logger.info(f"✅ ROUTE: FILE_CREATION_REQUEST for specific file: {detected_filename}")
             return ProcessedInput(
                 intent=UserInputIntent.FILE_CREATION_REQUEST,
                 data={
@@ -208,9 +279,19 @@ class UserInputHandler:
                 },
                 original_query=user_text
             )
+
+        # 2. PRIORITY: Check for complex projects FIRST (this fixes your bug)
+        elif self._is_plan_then_code_request(user_text):
+            logger.info(f"✅ ROUTE: PLAN_THEN_CODE_REQUEST - '{user_text[:50]}...'")
+            return ProcessedInput(
+                intent=UserInputIntent.PLAN_THEN_CODE_REQUEST,
+                data={"user_text": user_text, "image_data": image_data or []},
+                original_query=user_text
+            )
+
+        # 3. Simple single file request (only if not complex)
         elif self._is_single_file_request(user_text):
-            # Single file request without specific filename
-            logger.info("Detected FILE_CREATION_REQUEST (no specific filename)")
+            logger.info(f"✅ ROUTE: FILE_CREATION_REQUEST (single file, no filename) - '{user_text[:50]}...'")
             return ProcessedInput(
                 intent=UserInputIntent.FILE_CREATION_REQUEST,
                 data={
@@ -220,17 +301,9 @@ class UserInputHandler:
                 },
                 original_query=user_text
             )
-        elif self._is_plan_then_code_request(user_text):
-            # Multi-file project request
-            logger.info("Detected PLAN_THEN_CODE_REQUEST")
-            return ProcessedInput(
-                intent=UserInputIntent.PLAN_THEN_CODE_REQUEST,
-                data={"user_text": user_text, "image_data": image_data or []},
-                original_query=user_text
-            )
 
-        # Default to normal chat
-        logger.info("Defaulting to NORMAL_CHAT intent.")
+        # 4. Default to normal chat
+        logger.info(f"✅ ROUTE: NORMAL_CHAT - '{user_text[:50]}...'")
         return ProcessedInput(
             intent=UserInputIntent.NORMAL_CHAT,
             data={"user_text": user_text, "image_data": image_data or []},
