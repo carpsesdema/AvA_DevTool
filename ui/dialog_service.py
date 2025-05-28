@@ -62,7 +62,13 @@ class DialogService(QObject):
         logger.debug(f"DialogService: Request to show LLM terminal window (ensure_creation={ensure_creation}).")
         try:
             if self._llm_terminal_window is None and ensure_creation:
-                self._llm_terminal_window = LlmTerminalWindow(parent=None)  # Parent None for top-level
+                llm_logger = self.chat_manager.get_llm_communication_logger()
+                if llm_logger:
+                    self._llm_terminal_window = LlmTerminalWindow(llm_logger, parent=None)
+                    logger.info("DialogService: Created new LlmTerminalWindow with logger.")
+                else:
+                    logger.error("DialogService: Could not create LlmTerminalWindow - no logger available")
+                    return None
                 logger.info("DialogService: Created new LlmTerminalWindow instance.")
 
                 # Connect the LLM communication logger

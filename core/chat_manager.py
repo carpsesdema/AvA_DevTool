@@ -93,7 +93,7 @@ class ChatManager(QObject):
         self._llm_terminal_opened: bool = False
 
         # NEW: Connect to streaming signals
-        self._backend_coordinator.llmStreamChunkReceived.connect(self._handle_llm_stream_chunk)
+        self._event_bus.llmStreamChunkReceived.connect(self._handle_llm_stream_chunk)
 
         self._connect_event_bus_subscriptions()
         logger.info("ChatManager initialized and subscriptions connected.")

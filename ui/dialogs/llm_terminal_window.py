@@ -21,15 +21,15 @@ class LlmTerminalWindow(QDialog):
         self._streaming_block_elements: Dict[str, Dict[str, Any]] = {}
         # Structure: {block_id: {'pre_cursor_start': QTextCursor, 'code_cursor_start': QTextCursor, 'code_cursor_end': QTextCursor}}
 
-        self._setup_ui()
-        self._connect_signals()
-        self._load_existing_logs()
-
-        # Auto-scroll tracking
+        # FIXED: Initialize auto-scroll tracking BEFORE any method calls that might use it
         self._user_scrolled_up = False
         self._scroll_timer = QTimer()
         self._scroll_timer.setSingleShot(True)
         self._scroll_timer.timeout.connect(self._check_auto_scroll)
+
+        self._setup_ui()
+        self._connect_signals()
+        self._load_existing_logs()
 
         logger.info("Enhanced LlmTerminalWindow initialized with code streaming support")
 
