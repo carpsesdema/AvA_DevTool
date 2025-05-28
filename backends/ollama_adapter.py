@@ -3,6 +3,7 @@ import asyncio
 import base64
 import logging
 import sys
+import requests
 import re
 from typing import List, Optional, AsyncGenerator, Dict, Any, Tuple, Type
 
@@ -227,6 +228,7 @@ class OllamaAdapter(BackendInterface):
                 raise
 
     def get_available_models(self) -> List[str]:
+        """Get available models with increased timeout and better error handling"""
         self._last_error = None
         if not API_LIBRARY_AVAILABLE:
             self._last_error = "Ollama library not installed."
@@ -234,48 +236,39 @@ class OllamaAdapter(BackendInterface):
             return []
 
         model_names: List[str] = []
-        client_to_use: Optional[ollama.Client] = self._sync_client  # type: ignore
-        can_attempt_live_fetch = True
+        client_to_use: Optional[ollama.Client] = self._sync_client
 
-        if not client_to_use and self._is_configured:  # Adapter params are set, but client might be None due to earlier creation error
-            logger.warning(
-                "OllamaAdapter.get_available_models: Adapter is configured but client is None. Attempting to re-create.")
+        # Create or get client
+        if not client_to_use:
             try:
-                client_to_use = ollama.Client(host=self._ollama_host, timeout=7.0)  # type: ignore
-                # No need to list here, the thread below will do it.
-            except Exception as e_recreate:
-                logger.error(f"Failed to re-create Ollama client during get_available_models: {e_recreate}")
-                self._last_error = f"Client re-creation failed: {e_recreate}"
-                can_attempt_live_fetch = False
-        elif not client_to_use:  # Not configured, or client creation failed earlier and _is_configured is False
-            logger.info(
-                "OllamaAdapter.get_available_models: No pre-configured client. Attempting temporary client for model listing.")
-            try:
-                import socket
-                from urllib.parse import urlparse
-                parsed_host = urlparse(
-                    self._ollama_host if self._ollama_host.startswith('http') else f'http://{self._ollama_host}')
-                host = parsed_host.hostname or 'localhost'
-                port = parsed_host.port or 11434
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2.0)  # Quick check
-                result = sock.connect_ex((host, port))
-                sock.close()
-                if result != 0:
-                    self._last_error = f"Ollama server not responding at {host}:{port} (socket check failed for model list)."
-                    logger.warning(self._last_error)
-                    can_attempt_live_fetch = False
-                else:  # Socket check passed, try creating client
-                    client_to_use = ollama.Client(host=self._ollama_host, timeout=7.0)  # type: ignore
+                client_to_use = ollama.Client(host=self._ollama_host, timeout=30.0)  # Increased timeout
+                logger.info(f"Created temporary Ollama client for model fetching: {self._ollama_host}")
             except Exception as e_temp_client:
-                self._last_error = f"Failed to connect temporary Ollama client for model listing: {type(e_temp_client).__name__}"
-                logger.warning(self._last_error)
-                can_attempt_live_fetch = False
+                self._last_error = f"Failed to create Ollama client: {type(e_temp_client).__name__}"
+                logger.error(self._last_error)
+                # Return defaults if can't connect
+                return self._get_default_model_list()
 
-        if not client_to_use:  # If client_to_use is still None
-            can_attempt_live_fetch = False
+        # Test connection first
+        try:
+            # Quick ping test using requests
+            response = requests.get(f"{self._ollama_host}/api/tags", timeout=10)
+            if response.status_code != 200:
+                logger.warning(f"Ollama API returned status {response.status_code}")
+                return self._get_default_model_list()
 
-        if can_attempt_live_fetch and client_to_use:
+            # Parse response directly
+            data = response.json()
+            if 'models' in data:
+                for model_item in data['models']:
+                    if isinstance(model_item, dict) and 'name' in model_item:
+                        model_names.append(model_item['name'])
+                logger.info(f"Successfully fetched {len(model_names)} models from Ollama API")
+
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Direct API call failed: {e}, trying ollama library...")
+
+            # Fallback to ollama library with threading and longer timeout
             try:
                 import threading
                 import queue
@@ -284,7 +277,7 @@ class OllamaAdapter(BackendInterface):
 
                 def fetch_models_thread():
                     try:
-                        models_response = client_to_use.list()  # type: ignore
+                        models_response = client_to_use.list()
                         result_queue.put(models_response)
                     except Exception as e_thread:
                         exception_queue.put(e_thread)
@@ -292,128 +285,122 @@ class OllamaAdapter(BackendInterface):
                 fetch_thread = threading.Thread(target=fetch_models_thread)
                 fetch_thread.daemon = True
                 fetch_thread.start()
-                fetch_thread.join(timeout=10.0)  # Increased timeout slightly
+                fetch_thread.join(timeout=20.0)  # Increased from 10 to 20 seconds
+
                 if fetch_thread.is_alive():
-                    logger.warning(f"Ollama model fetch timed out for {self._ollama_host} after 10 seconds.")
-                    self._last_error = "Ollama model fetch timed out."
+                    logger.warning(f"Ollama model fetch timed out after 20 seconds")
+                    self._last_error = "Model fetch timed out"
                 elif not exception_queue.empty():
                     e_fetch_thread = exception_queue.get()
-                    self._last_error = f"Error in Ollama model fetch thread: {type(e_fetch_thread).__name__} - {e_fetch_thread}"
-                    logger.warning(self._last_error)  # Log as warning, will fallback to defaults
+                    self._last_error = f"Error fetching models: {type(e_fetch_thread).__name__} - {e_fetch_thread}"
+                    logger.warning(self._last_error)
                 elif not result_queue.empty():
                     models_response_data = result_queue.get()
                     items_to_parse = []
                     if isinstance(models_response_data, dict) and 'models' in models_response_data:
                         items_to_parse = models_response_data['models']
-                    elif isinstance(models_response_data, list):  # ollama library might return list directly
+                    elif isinstance(models_response_data, list):
                         items_to_parse = models_response_data
 
                     for item in items_to_parse:
                         model_id_to_add = None
-                        if _ollama_types_imported_successfully and isinstance(item, _OllamaModelType):
-                            model_id_to_add = getattr(item, 'name', None)
-                        elif isinstance(item, dict):
+                        if isinstance(item, dict):
                             model_id_to_add = item.get('name') or item.get('model')
-                        elif hasattr(item, 'name') and isinstance(item.name, str):  # type: ignore
-                            model_id_to_add = item.name  # type: ignore
-                        elif hasattr(item, 'model') and isinstance(item.model, str):  # type: ignore
-                            model_id_to_add = item.model  # type: ignore
+                        elif hasattr(item, 'name') and isinstance(item.name, str):
+                            model_id_to_add = item.name
+                        elif hasattr(item, 'model') and isinstance(item.model, str):
+                            model_id_to_add = item.model
 
                         if model_id_to_add and isinstance(model_id_to_add, str):
                             model_names.append(model_id_to_add)
-                    logger.info(f"Fetched {len(model_names)} models live from Ollama.")
-                else:  # No error, no result
-                    logger.warning(
-                        f"No response or empty model list from Ollama at {self._ollama_host}, but no explicit error.")
-                    self._last_error = "Ollama returned no models or an empty list."
-            except Exception as e_fetch_outer:  # Catch any other exception during the threaded fetch setup
-                self._last_error = f"Outer error during Ollama model fetch: {type(e_fetch_outer).__name__} - {e_fetch_outer}"
-                logger.warning(self._last_error, exc_info=True)
-        elif not can_attempt_live_fetch:
-            logger.info("Skipping live Ollama model fetch due to initial connection/client issues. Will use defaults.")
 
-        # Enhanced default candidates list based on user's provided list
-        default_candidates = [
+                    logger.info(f"Fetched {len(model_names)} models using ollama library")
+
+            except Exception as e_fetch_outer:
+                self._last_error = f"Both API methods failed: {type(e_fetch_outer).__name__} - {e_fetch_outer}"
+                logger.error(self._last_error)
+
+        # If we got models, combine with defaults, otherwise just use defaults
+        if model_names:
+            logger.info(f"Successfully fetched {len(model_names)} models from Ollama")
+            combined_list = list(set(model_names + self._get_default_model_list()))
+        else:
+            logger.warning("No models fetched from Ollama, using defaults only")
+            combined_list = self._get_default_model_list()
+
+        # Sort the final list
+        final_model_list = sorted(combined_list, key=self._sort_key_ollama)
+
+        # Ensure current model is included
+        if self._model_name and self._is_configured and self._model_name not in final_model_list:
+            final_model_list.insert(0, self._model_name)
+            final_model_list = sorted(final_model_list, key=self._sort_key_ollama)
+
+        logger.info(f"Returning {len(final_model_list)} total models. First 5: {final_model_list[:5]}")
+        return final_model_list
+
+    def _get_default_model_list(self) -> List[str]:
+        """Get the default model list as fallback"""
+        return [
             "qwen2.5-coder:32b", "qwen2.5-coder:14b", "qwen2.5-coder:latest",
             "qwen3:30b", "qwen2:latest", "qwen:latest",
             "devstral:24b", "devstral:latest",
-            "codellama:34b", "codellama:13b", "codellama:13b-instruct", "codellama:13b-python", "codellama:7b",
-            "codellama:latest",
+            "codellama:34b", "codellama:13b", "codellama:13b-instruct",
+            "codellama:13b-python", "codellama:7b", "codellama:latest",
             "llama3:30b", "llama3:latest",
             "deepseek-coder:6.7b-instruct-q5_K_M", "deepseek-r1:14b",
             "wizardcoder:13b-python",
             "starcoder2:15b-instruct", "starcoder2:7b",
-            "mistral:latest",
-            "phi3:latest",
-            self.DEFAULT_MODEL  # Ensure the adapter's own default is present
+            "mistral:latest", "phi3:latest",
+            self.DEFAULT_MODEL
         ]
-        if self._model_name and self._model_name not in default_candidates:  # Add currently configured model if not in defaults
-            default_candidates.insert(0, self._model_name)
 
-        # Combine fetched models with defaults, ensuring uniqueness
-        combined_list = list(set(model_names + [m for m in default_candidates if m not in model_names]))
-        if not combined_list and self._model_name:  # If fetch failed and defaults are empty for some reason, use current
-            combined_list.append(self._model_name)
-        elif not combined_list:  # Absolute fallback
-            combined_list.append(self.DEFAULT_MODEL)
+    def _sort_key_ollama(self, model_name_str: str):
+        """Sorting key for Ollama models"""
+        name_lower = model_name_str.lower()
+        is_latest = "latest" in name_lower
+        is_current_adapter_model = model_name_str == self._model_name
 
-        combined_list = list(set(combined_list))  # Ensure uniqueness again
+        priority = 10  # Default priority
 
-        def sort_key_ollama(model_name_str: str):
-            name_lower = model_name_str.lower()
-            is_latest = "latest" in name_lower
-            is_current_adapter_model = model_name_str == self._model_name
+        # Prioritize based on keywords
+        if "qwen2.5-coder:32b" in name_lower:
+            priority = 0
+        elif "qwen2.5-coder:14b" in name_lower:
+            priority = 1
+        elif "qwen2.5-coder:latest" in name_lower:
+            priority = 2
+        elif "qwen3:30b" in name_lower:
+            priority = 3
+        elif "qwen" in name_lower:
+            priority = 4
+        elif "devstral" in name_lower:
+            priority = 5
+        elif "codellama" in name_lower:
+            priority = 6
+        elif "llama3" in name_lower:
+            priority = 7
+        elif "deepseek" in name_lower or "wizardcoder" in name_lower or "starcoder" in name_lower:
+            priority = 8
+        elif "mistral" in name_lower or "phi3" in name_lower:
+            priority = 9
 
-            priority = 10  # Default priority
+        size_priority = 100  # Default if no size detected
+        if 'b' in name_lower:
+            try:
+                size_match = re.search(r'(\d+(?:\.\d+)?)(?:b|B)', name_lower)
+                if size_match:
+                    size_priority = -float(size_match.group(1))  # Negative for descending size
+            except:
+                pass  # Ignore parsing errors for size
 
-            # Prioritize based on keywords
-            if "qwen2.5-coder:32b" in name_lower:
-                priority = 0
-            elif "qwen2.5-coder:14b" in name_lower:
-                priority = 1
-            elif "qwen2.5-coder:latest" in name_lower:
-                priority = 2
-            elif "qwen3:30b" in name_lower:
-                priority = 3
-            elif "qwen" in name_lower:
-                priority = 4
-            elif "devstral" in name_lower:
-                priority = 5
-            elif "codellama" in name_lower:
-                priority = 6
-            elif "llama3" in name_lower:
-                priority = 7
-            elif "deepseek" in name_lower or "wizardcoder" in name_lower or "starcoder" in name_lower:
-                priority = 8
-            elif "mistral" in name_lower or "phi3" in name_lower:
-                priority = 9
-
-            size_priority = 100  # Default if no size detected
-            if 'b' in name_lower:
-                try:
-                    size_match = re.search(r'(\d+(?:\.\d+)?)(?:b|B)', name_lower)
-                    if size_match:
-                        size_priority = -float(size_match.group(1))  # Negative for descending size
-                except:
-                    pass  # Ignore parsing errors for size
-
-            return (
-                0 if is_current_adapter_model else 1,  # Current model first
-                priority,  # Keyword priority
-                size_priority,  # Size (larger first)
-                0 if is_latest else 1,  # "latest" tags
-                name_lower  # Alphabetical as final tie-breaker
-            )
-
-        final_model_list = sorted(combined_list, key=sort_key_ollama)
-
-        if not final_model_list:  # Should not happen with fallbacks
-            logger.error("OllamaAdapter: Final model list is unexpectedly empty. Returning default model only.")
-            return [self.DEFAULT_MODEL]
-
-        logger.info(
-            f"OllamaAdapter: Returning {len(final_model_list)} available models. Top models: {final_model_list[:5]}")
-        return final_model_list
+        return (
+            0 if is_current_adapter_model else 1,  # Current model first
+            priority,  # Keyword priority
+            size_priority,  # Size (larger first)
+            0 if is_latest else 1,  # "latest" tags
+            name_lower  # Alphabetical as final tie-breaker
+        )
 
     def _format_history_for_api(self, history: List[ChatMessage]) -> List[Dict[str, Any]]:
         ollama_messages: List[Dict[str, Any]] = []
