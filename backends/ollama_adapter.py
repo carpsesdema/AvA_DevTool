@@ -181,8 +181,7 @@ class OllamaAdapter(BackendInterface):
             logger.error(error_msg, exc_info=True)
             yield f"[SYSTEM ERROR: {error_msg}]"
 
-    async def _stream_with_enhanced_timeout(self, messages: List[Dict[str, Any]], options: Dict[str, Any]) -> \
-    AsyncGenerator[str, None]:
+    async def _stream_with_enhanced_timeout(self, messages: List[Dict[str, Any]], options: Dict[str, Any]) -> AsyncGenerator[str, None]:
         """Enhanced streaming with proper timeout and retry handling."""
 
         max_retries = 2
@@ -228,11 +227,16 @@ class OllamaAdapter(BackendInterface):
                         raise OllamaStreamTimeoutError(f"No chunk received in {chunk_timeout}s")
 
                     try:
-                        # Get next chunk with timeout
-                        chunk_task = asyncio.create_task(
-                            loop.run_in_executor(None, self._get_next_chunk, ollama_sync_iterator)
-                        )
-                        chunk_data_obj = await asyncio.wait_for(chunk_task, timeout=chunk_timeout)
+                        # FIX: Don't use create_task with the future from run_in_executor
+                        # Instead, use await directly on the future
+                        try:
+                            chunk_future = loop.run_in_executor(None, self._get_next_chunk, ollama_sync_iterator)
+                            chunk_data_obj = await asyncio.wait_for(chunk_future, timeout=chunk_timeout)
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Chunk timeout after {chunk_count} chunks on attempt {attempt + 1}")
+                            if attempt < max_retries:
+                                break  # Try next attempt
+                            raise OllamaStreamTimeoutError(f"Chunk timeout after {max_retries + 1} attempts")
 
                         if chunk_data_obj is None:  # Stream ended normally
                             logger.info(f"Ollama stream ended normally after {chunk_count} chunks")
@@ -267,17 +271,20 @@ class OllamaAdapter(BackendInterface):
                             self._last_completion_tokens = getattr(chunk_data_obj, 'eval_count', None)
                             return
 
-                        # Brief pause to prevent tight loop
-                        await asyncio.sleep(0.01)
-
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Chunk timeout after {chunk_count} chunks on attempt {attempt + 1}")
+                    except Exception as e:
+                        if isinstance(e, OllamaStreamTimeoutError) or isinstance(e, asyncio.TimeoutError):
+                            raise
+                        logger.error(f"Error processing chunk: {e}", exc_info=True)
                         if attempt < max_retries:
-                            break  # Try next attempt
-                        raise OllamaStreamTimeoutError(f"Chunk timeout after {max_retries + 1} attempts")
+                            break
+                        else:
+                            raise
 
-                # If we got here, this attempt succeeded
-                return
+                    # Brief pause to prevent tight loop
+                    await asyncio.sleep(0.01)
+
+                # If we got here, this attempt failed but we're retrying
+                continue
 
             except (OllamaStreamTimeoutError, asyncio.TimeoutError) as timeout_error:
                 logger.warning(f"Timeout on attempt {attempt + 1}: {timeout_error}")
