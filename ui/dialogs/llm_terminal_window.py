@@ -1,310 +1,380 @@
+# ui/dialogs/llm_terminal_window.py - Enhanced with code streaming support
 import logging
-from typing import Optional
-from datetime import datetime
-
-from PySide6.QtCore import Slot, Qt
-from PySide6.QtGui import QCloseEvent, QFont, QFontDatabase, QTextCharFormat, QColor, QPalette
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QHBoxLayout,
-                               QPushButton, QLabel, QFrame, QScrollBar)
-
-try:
-    from utils import constants
-except ImportError:
-    class constants_fallback:
-        CHAT_FONT_FAMILY = "Courier New"
-        CHAT_FONT_SIZE = 9
-
-
-    constants = constants_fallback
-    logging.getLogger(__name__).warning("LlmTerminalWindow: Could not import constants, using fallback values.")
+from typing import Dict, Any, Optional
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTextEdit,
+                               QPushButton, QLabel, QSizePolicy, QSplitter)
+from PySide6.QtCore import Qt, Slot, QTimer
+from PySide6.QtGui import QFont, QTextCursor, QTextDocument
 
 logger = logging.getLogger(__name__)
 
 
-class LlmTerminalWindow(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None):
+class LlmTerminalWindow(QDialog):
+    """Enhanced LLM Terminal Window with real-time code streaming support"""
+
+    def __init__(self, llm_comm_logger, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("🤖 LLM Communication Terminal")
-        self.setObjectName("LlmTerminalWindow")
-        self.setMinimumSize(900, 600)
-        self.resize(1200, 800)
+        self._llm_comm_logger = llm_comm_logger
 
-        self._log_text_edit: Optional[QTextEdit] = None
-        self._message_count = 0
-        self._init_ui()
-        self._apply_dark_theme()
-        logger.info("LlmTerminalWindow initialized with modern styling.")
+        # NEW: Code streaming state management
+        self._streaming_block_cursors: Dict[str, QTextCursor] = {}
+        self._streaming_block_elements: Dict[str, Dict[str, Any]] = {}
+        # Structure: {block_id: {'pre_cursor_start': QTextCursor, 'code_cursor_start': QTextCursor, 'code_cursor_end': QTextCursor}}
 
-    def _init_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        self._setup_ui()
+        self._connect_signals()
+        self._load_existing_logs()
 
-        # Header bar with title and controls
-        header_frame = QFrame()
-        header_frame.setObjectName("HeaderFrame")
-        header_frame.setFixedHeight(50)
+        # Auto-scroll tracking
+        self._user_scrolled_up = False
+        self._scroll_timer = QTimer()
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._check_auto_scroll)
 
-        header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(15, 10, 15, 10)
+        logger.info("Enhanced LlmTerminalWindow initialized with code streaming support")
 
-        # Title with icon
-        title_label = QLabel("🔍 LLM Communication Log")
-        title_label.setObjectName("TitleLabel")
+    def _setup_ui(self):
+        self.setWindowTitle("LLM Communication Terminal")
+        self.setModal(False)
+        self.resize(1000, 700)
 
-        # Connection status indicator
-        self.status_label = QLabel("● CONNECTED")
-        self.status_label.setObjectName("StatusLabel")
+        # Main layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # Header
+        header_layout = QHBoxLayout()
+        header_label = QLabel("🤖 LLM Communication Log")
+        header_label.setStyleSheet("""
+            QLabel {
+                font-size: 16px;
+                font-weight: bold;
+                color: #e0e0e0;
+                padding: 8px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 6px;
+            }
+        """)
+        header_layout.addWidget(header_label)
+        header_layout.addStretch()
 
         # Control buttons
-        clear_btn = QPushButton("Clear Log")
-        clear_btn.setObjectName("ClearButton")
-        clear_btn.clicked.connect(self.clear_log)
-
-        export_btn = QPushButton("Export")
-        export_btn.setObjectName("ExportButton")
-
-        header_layout.addWidget(title_label)
-        header_layout.addStretch()
-        header_layout.addWidget(self.status_label)
-        header_layout.addWidget(clear_btn)
-        header_layout.addWidget(export_btn)
-
-        main_layout.addWidget(header_frame)
-
-        # Main terminal area
-        self._log_text_edit = QTextEdit()
-        self._log_text_edit.setObjectName("TerminalTextEdit")
-        self._log_text_edit.setReadOnly(True)
-
-        # Set up monospace font
-        font = QFont("JetBrains Mono", 11)  # Modern monospace font
-        if not font.exactMatch():
-            font = QFont("Consolas", 11)
-            if not font.exactMatch():
-                font = QFont("Courier New", 11)
-
-        font.setStyleHint(QFont.StyleHint.TypeWriter)
-        self._log_text_edit.setFont(font)
-
-        # Custom scrollbar styling will be handled in CSS
-        self._log_text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._log_text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
-        main_layout.addWidget(self._log_text_edit, 1)
-        self.setLayout(main_layout)
-
-    def _apply_dark_theme(self):
-        """Apply modern dark theme styling"""
-        self.setStyleSheet("""
-            /* Main window */
-            QWidget#LlmTerminalWindow {
-                background-color: #1a1a1a;
+        self._clear_button = QPushButton("Clear Log")
+        self._clear_button.setStyleSheet("""
+            QPushButton {
+                background: #404040;
                 color: #e0e0e0;
-            }
-
-            /* Header frame */
-            QFrame#HeaderFrame {
-                background-color: #2d2d2d;
-                border-bottom: 1px solid #404040;
-            }
-
-            /* Title label */
-            QLabel#TitleLabel {
-                color: #ffffff;
-                font-size: 14px;
-                font-weight: bold;
-            }
-
-            /* Status label */
-            QLabel#StatusLabel {
-                color: #4ade80;
-                font-size: 12px;
-                font-weight: bold;
-            }
-
-            /* Buttons */
-            QPushButton#ClearButton, QPushButton#ExportButton {
-                background-color: #404040;
-                color: #e0e0e0;
-                border: 1px solid #555555;
+                border: 1px solid #606060;
                 border-radius: 4px;
                 padding: 6px 12px;
-                font-size: 11px;
-                min-width: 60px;
+                font-weight: bold;
             }
-
-            QPushButton#ClearButton:hover, QPushButton#ExportButton:hover {
-                background-color: #505050;
-                border-color: #666666;
+            QPushButton:hover {
+                background: #505050;
+                border-color: #707070;
             }
-
-            QPushButton#ClearButton:pressed, QPushButton#ExportButton:pressed {
-                background-color: #353535;
+            QPushButton:pressed {
+                background: #353535;
             }
+        """)
+        self._clear_button.clicked.connect(self._clear_log)
 
-            /* Terminal text edit */
-            QTextEdit#TerminalTextEdit {
-                background-color: #0f0f0f;
+        self._auto_scroll_button = QPushButton("Auto-Scroll: ON")
+        self._auto_scroll_button.setCheckable(True)
+        self._auto_scroll_button.setChecked(True)
+        self._auto_scroll_button.setStyleSheet("""
+            QPushButton {
+                background: #2e7d32;
                 color: #e0e0e0;
-                border: none;
-                padding: 15px;
-                selection-background-color: #264f78;
+                border: 1px solid #4caf50;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #388e3c;
+                border-color: #66bb6a;
+            }
+            QPushButton:checked {
+                background: #2e7d32;
+                border-color: #4caf50;
+            }
+            QPushButton:!checked {
+                background: #404040;
+                border-color: #606060;
+            }
+        """)
+        self._auto_scroll_button.toggled.connect(self._toggle_auto_scroll)
+
+        header_layout.addWidget(self._clear_button)
+        header_layout.addWidget(self._auto_scroll_button)
+        layout.addLayout(header_layout)
+
+        # Main log display
+        self._log_text_edit = QTextEdit()
+        self._log_text_edit.setReadOnly(True)
+        self._log_text_edit.setFont(QFont("JetBrains Mono", 10))
+
+        # Enhanced styling for better code display
+        self._log_text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #404040;
+                border-radius: 6px;
+                padding: 8px;
+                selection-background-color: #3b3b3b;
                 selection-color: #ffffff;
             }
-
-            /* Scrollbars */
             QScrollBar:vertical {
-                background-color: #2d2d2d;
+                background: #2e2e2e;
                 width: 12px;
-                border: none;
+                border-radius: 6px;
             }
-
             QScrollBar::handle:vertical {
-                background-color: #555555;
+                background: #606060;
                 border-radius: 6px;
                 min-height: 20px;
             }
-
             QScrollBar::handle:vertical:hover {
-                background-color: #666666;
-            }
-
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                border: none;
-                background: none;
-            }
-
-            QScrollBar:horizontal {
-                background-color: #2d2d2d;
-                height: 12px;
-                border: none;
-            }
-
-            QScrollBar::handle:horizontal {
-                background-color: #555555;
-                border-radius: 6px;
-                min-width: 20px;
-            }
-
-            QScrollBar::handle:horizontal:hover {
-                background-color: #666666;
+                background: #707070;
             }
         """)
 
-    def _get_message_color(self, sender_type: str) -> str:
-        """Get color for different message types"""
-        colors = {
-            "USER": "#60a5fa",  # Blue
-            "ASSISTANT": "#34d399",  # Green
-            "SYSTEM": "#f59e0b",  # Orange
-            "ERROR": "#ef4444",  # Red
-            "PLANNER": "#a78bfa",  # Purple
-            "CODER": "#06b6d4",  # Cyan
-            "TERMINAL": "#6b7280",  # Gray
-            "DEBUG": "#9ca3af"  # Light gray
-        }
-        return colors.get(sender_type.upper(), "#e0e0e0")
+        # Monitor scroll position
+        scrollbar = self._log_text_edit.verticalScrollBar()
+        scrollbar.valueChanged.connect(self._on_scroll_changed)
 
-    def _get_formatted_timestamp(self) -> str:
-        """Get formatted timestamp"""
-        return datetime.now().strftime("%H:%M:%S")
+        layout.addWidget(self._log_text_edit, 1)
+
+        # Status bar
+        self._status_label = QLabel("Ready - Monitoring LLM communications")
+        self._status_label.setStyleSheet("""
+            QLabel {
+                color: #b0b0b0;
+                font-size: 11px;
+                padding: 4px 8px;
+                background: rgba(255, 255, 255, 0.05);
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self._status_label)
+
+    def _connect_signals(self):
+        """Connect to LlmCommunicationLogger signals"""
+        if self._llm_comm_logger:
+            # Regular logging
+            self._llm_comm_logger.new_log_entry.connect(self.add_log_entry)
+
+            # NEW: Code streaming signals
+            self._llm_comm_logger.code_block_stream_started.connect(self.handle_code_block_stream_started)
+            self._llm_comm_logger.code_block_chunk_received.connect(self.handle_code_block_chunk_received)
+            self._llm_comm_logger.code_block_stream_finished.connect(self.handle_code_block_stream_finished)
+
+    def _load_existing_logs(self):
+        """Load any existing log entries"""
+        if self._llm_comm_logger:
+            existing_logs = self._llm_comm_logger.get_all_logs()
+            for log_entry in existing_logs:
+                self.add_log_entry(log_entry)
 
     @Slot(str)
-    def add_log_entry(self, html_text: str):
-        """Add a log entry with improved formatting"""
-        if not self._log_text_edit:
-            logger.warning("LlmTerminalWindow: _log_text_edit is None, cannot add log entry.")
+    def add_log_entry(self, formatted_entry: str):
+        """Add a regular log entry to the terminal"""
+        cursor = self._log_text_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertHtml(formatted_entry)
+
+        self._auto_scroll_if_needed()
+        self._update_status()
+
+    # NEW: Code streaming slots
+    @Slot(str, str)
+    def handle_code_block_stream_started(self, block_id: str, language_hint: str):
+        """Handle the start of a code streaming session"""
+        logger.info(f"Starting code block display for {block_id} ({language_hint})")
+
+        # Get cursor at end of document
+        cursor = self._log_text_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+        # Store the position before inserting HTML structure
+        pre_cursor_start_pos = cursor.position()
+
+        # Create the HTML structure for the code block
+        # Using a unique marker that we can find and replace
+        marker_id = f"stream-code-{block_id}"
+        code_block_html = f"""
+<div style="margin: 8px 0;">
+<pre style="background-color: #0f0f0f; color: #e0e0e0; padding: 12px; margin: 0; border-radius: 6px; border: 2px solid #404040; white-space: pre-wrap; word-wrap: break-word; font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace; line-height: 1.5; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"><code id="{marker_id}">STREAMING_MARKER_{block_id}</code></pre>
+</div>"""
+
+        # Insert the HTML structure
+        cursor.insertHtml(code_block_html)
+
+        # Now find the marker text and position cursor there
+        document = self._log_text_edit.document()
+        marker_text = f"STREAMING_MARKER_{block_id}"
+
+        # Search for the marker
+        cursor = document.find(marker_text)
+        if cursor.isNull():
+            logger.error(f"Could not find streaming marker for block {block_id}")
             return
 
-        self._message_count += 1
+        # Select and remove the marker text
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        cursor.removeSelectedText()
 
-        # Move cursor to end
-        cursor = self._log_text_edit.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._log_text_edit.setTextCursor(cursor)
+        # Now cursor is positioned where code should be inserted
+        code_cursor_start_pos = cursor.position()
 
-        # Add separator line for new conversations
-        if self._message_count > 1:
-            separator = f'<div style="border-top: 1px solid #404040; margin: 10px 0;"></div>'
-            self._log_text_edit.insertHtml(separator)
+        # Store cursor information for this block
+        self._streaming_block_cursors[block_id] = cursor
+        self._streaming_block_elements[block_id] = {
+            'pre_cursor_start_pos': pre_cursor_start_pos,
+            'code_cursor_start_pos': code_cursor_start_pos,
+            'code_cursor_end_pos': code_cursor_start_pos,
+            'language': language_hint
+        }
 
-        # Parse sender from HTML (basic extraction)
-        sender = "SYSTEM"
-        if "USER" in html_text.upper():
-            sender = "USER"
-        elif "ASSISTANT" in html_text.upper() or "AI" in html_text.upper():
-            sender = "ASSISTANT"
-        elif "ERROR" in html_text.upper():
-            sender = "ERROR"
-        elif "PLANNER" in html_text.upper():
-            sender = "PLANNER"
-        elif "CODER" in html_text.upper():
-            sender = "CODER"
-        elif "TERMINAL" in html_text.upper():
-            sender = "TERMINAL"
+        self._auto_scroll_if_needed()
+        self._update_status(f"Streaming {language_hint} code...")
 
-        # Create styled message header
-        color = self._get_message_color(sender)
-        timestamp = self._get_formatted_timestamp()
+    @Slot(str, str)
+    def handle_code_block_chunk_received(self, block_id: str, plain_text_chunk: str):
+        """Handle receiving a chunk of code during streaming"""
+        if block_id not in self._streaming_block_cursors:
+            logger.warning(f"Received chunk for unknown block_id: {block_id}")
+            return
 
-        header_html = f'''
-        <div style="margin: 8px 0;">
-            <span style="color: {color}; font-weight: bold;">
-                ● {sender}
-            </span>
-            <span style="color: #888888; font-size: 10px; margin-left: 10px;">
-                {timestamp}
-            </span>
-        </div>
-        '''
+        # Get the cursor for this block
+        cursor = self._streaming_block_cursors[block_id]
 
-        # Style the content with proper indentation
-        content_html = f'''
-        <div style="margin-left: 20px; padding: 5px 0; border-left: 2px solid {color}; padding-left: 10px;">
-            {html_text}
-        </div>
-        '''
+        # Insert the plain text chunk
+        cursor.insertText(plain_text_chunk)
 
-        self._log_text_edit.insertHtml(header_html)
-        self._log_text_edit.insertHtml(content_html)
+        # Update the end position
+        self._streaming_block_elements[block_id]['code_cursor_end_pos'] = cursor.position()
 
-        # Auto-scroll to bottom
-        scrollbar = self._log_text_edit.verticalScrollBar()
-        if scrollbar:
+        # Keep cursor position for next chunk
+        self._streaming_block_cursors[block_id] = cursor
+
+        self._auto_scroll_if_needed()
+
+        # Update status periodically (not for every chunk to avoid spam)
+        if len(plain_text_chunk) > 50 or '\n' in plain_text_chunk:
+            total_length = self._streaming_block_elements[block_id]['code_cursor_end_pos'] - \
+                           self._streaming_block_elements[block_id]['code_cursor_start_pos']
+            language = self._streaming_block_elements[block_id]['language']
+            self._update_status(f"Streaming {language} code... ({total_length} chars)")
+
+    @Slot(str, str)
+    def handle_code_block_stream_finished(self, block_id: str, final_highlighted_html_content: str):
+        """Handle completion of code streaming with syntax highlighting"""
+        if block_id not in self._streaming_block_elements:
+            logger.warning(f"Received completion for unknown block_id: {block_id}")
+            return
+
+        logger.info(f"Finalizing code block {block_id} with syntax highlighting")
+
+        # Get stored cursor positions
+        block_info = self._streaming_block_elements[block_id]
+        start_pos = block_info['code_cursor_start_pos']
+        end_pos = block_info['code_cursor_end_pos']
+        language = block_info['language']
+
+        # Create cursor to select all the plain text that was streamed
+        replace_cursor = self._log_text_edit.textCursor()
+        replace_cursor.setPosition(start_pos)
+        replace_cursor.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+
+        # Remove the plain text
+        replace_cursor.removeSelectedText()
+
+        # Insert the highlighted HTML content
+        replace_cursor.insertHtml(final_highlighted_html_content)
+
+        # Clean up tracking data
+        del self._streaming_block_cursors[block_id]
+        del self._streaming_block_elements[block_id]
+
+        self._auto_scroll_if_needed()
+        self._update_status(f"Code block completed ({language})")
+
+        # Return to "Ready" status after a short delay
+        QTimer.singleShot(3000, lambda: self._update_status("Ready - Monitoring LLM communications"))
+
+    def _auto_scroll_if_needed(self):
+        """Auto-scroll to bottom if user hasn't scrolled up manually"""
+        if self._auto_scroll_button.isChecked() and not self._user_scrolled_up:
+            scrollbar = self._log_text_edit.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
 
-    @Slot()
-    def clear_log(self):
-        """Clear the log with confirmation"""
-        if self._log_text_edit:
-            self._log_text_edit.clear()
-            self._message_count = 0
+    def _on_scroll_changed(self, value):
+        """Track if user has scrolled up manually"""
+        scrollbar = self._log_text_edit.verticalScrollBar()
+        max_value = scrollbar.maximum()
 
-            # Add welcome message
-            welcome_html = f'''
-            <div style="text-align: center; color: #888888; margin: 50px 0;">
-                <h2 style="color: #60a5fa;">🤖 LLM Communication Terminal</h2>
-                <p>Ready to monitor AI conversations...</p>
-                <p style="font-size: 10px;">Started at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-            </div>
-            '''
-            self._log_text_edit.insertHtml(welcome_html)
+        # Consider user has scrolled up if they're not at the bottom
+        # Add some tolerance for rounding errors
+        self._user_scrolled_up = (value < max_value - 5)
 
-            logger.info("LLM Terminal log cleared.")
+        # Reset scroll flag after a delay if user scrolls back to bottom
+        if not self._user_scrolled_up:
+            self._scroll_timer.start(1000)
+
+    def _check_auto_scroll(self):
+        """Re-enable auto-scroll if user is at bottom"""
+        scrollbar = self._log_text_edit.verticalScrollBar()
+        if scrollbar.value() >= scrollbar.maximum() - 5:
+            self._user_scrolled_up = False
+
+    def _toggle_auto_scroll(self, enabled):
+        """Toggle auto-scroll feature"""
+        self._auto_scroll_button.setText(f"Auto-Scroll: {'ON' if enabled else 'OFF'}")
+        if enabled:
+            self._user_scrolled_up = False
+            self._auto_scroll_if_needed()
+
+    def _clear_log(self):
+        """Clear the log display and logger"""
+        self._log_text_edit.clear()
+        if self._llm_comm_logger:
+            self._llm_comm_logger.clear_logs()
+
+        # Clean up any active streaming state
+        self._streaming_block_cursors.clear()
+        self._streaming_block_elements.clear()
+
+        self._update_status("Log cleared")
+        logger.info("LLM terminal log cleared")
+
+    def _update_status(self, message: str = None):
+        """Update the status label"""
+        if message:
+            self._status_label.setText(message)
         else:
-            logger.warning("LlmTerminalWindow: _log_text_edit is None, cannot clear log.")
+            # Show number of active streams if any
+            active_streams = len(self._streaming_block_cursors)
+            if active_streams > 0:
+                self._status_label.setText(f"Ready - {active_streams} active code stream(s)")
+            else:
+                self._status_label.setText("Ready - Monitoring LLM communications")
 
-    def update_connection_status(self, connected: bool, backend_name: str = ""):
-        """Update the connection status indicator"""
-        if connected:
-            self.status_label.setText(f"● CONNECTED {backend_name}")
-            self.status_label.setStyleSheet("color: #4ade80; font-weight: bold;")
-        else:
-            self.status_label.setText("● DISCONNECTED")
-            self.status_label.setStyleSheet("color: #ef4444; font-weight: bold;")
+    def closeEvent(self, event):
+        """Handle window close event"""
+        # Clean up any active streams
+        if self._streaming_block_cursors:
+            logger.info(f"Cleaning up {len(self._streaming_block_cursors)} active code streams on close")
+            self._streaming_block_cursors.clear()
+            self._streaming_block_elements.clear()
 
-    def closeEvent(self, event: QCloseEvent):
-        logger.debug("LlmTerminalWindow closeEvent: Hiding window.")
-        self.hide()
-        event.ignore()
+        event.accept()
+
+    def showEvent(self, event):
+        """Handle window show event"""
+        super().showEvent(event)
+        # Scroll to bottom when window is shown
+        self._auto_scroll_if_needed()

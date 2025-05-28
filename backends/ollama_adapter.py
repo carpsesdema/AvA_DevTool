@@ -1,4 +1,4 @@
-# backends/ollama_adapter.py - Enhanced with timeout handling
+# backends/ollama_adapter.py - Enhanced with NO TIMEOUTS for complex RAG requests
 import asyncio
 import base64
 import logging
@@ -43,11 +43,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class OllamaStreamTimeoutError(Exception):
-    """Custom exception for Ollama streaming timeouts."""
-    pass
-
-
 class OllamaAdapter(BackendInterface):
     DEFAULT_OLLAMA_HOST = "http://localhost:11434"
     DEFAULT_MODEL = "qwen2.5-coder:14b"
@@ -62,12 +57,12 @@ class OllamaAdapter(BackendInterface):
         self._ollama_host: str = self.DEFAULT_OLLAMA_HOST
         self._last_prompt_tokens: Optional[int] = None
         self._last_completion_tokens: Optional[int] = None
-        logger.info("Enhanced OllamaAdapter initialized with timeout handling.")
+        logger.info("Enhanced OllamaAdapter initialized with NO TIMEOUTS for complex requests")
 
     def configure(self, api_key: Optional[str], model_name: Optional[str], system_prompt: Optional[str] = None) -> bool:
         effective_model_name = model_name if model_name and model_name.strip() else self.DEFAULT_MODEL
         logger.info(
-            f"OllamaAdapter: Configuring. Host: {self._ollama_host}, Effective Model: {effective_model_name}. System Prompt: {'Yes' if system_prompt else 'No'}")
+            f"OllamaAdapter: Configuring for INFINITE PATIENCE. Host: {self._ollama_host}, Model: {effective_model_name}")
 
         self._sync_client = None
         self._is_configured = False
@@ -85,20 +80,17 @@ class OllamaAdapter(BackendInterface):
                                                                   str) and system_prompt.strip() else None
 
         try:
-            logger.info(f"Creating Ollama client with enhanced timeout settings...")
-            # ENHANCED: Set longer timeout for initial connection and operations
-            self._sync_client = ollama.Client(
-                host=self._ollama_host,
-                timeout=60.0  # Increased from default 30s to 60s
-            )
+            logger.info(f"Creating Ollama client with INFINITE PATIENCE settings...")
+            # ENHANCED: Remove timeouts completely for complex RAG requests
+            self._sync_client = ollama.Client(host=self._ollama_host)
 
             self._is_configured = True
-            logger.info(f"OllamaAdapter parameters configured for model '{self._model_name}' at {self._ollama_host}.")
+            logger.info(f"OllamaAdapter configured for infinite patience with model '{self._model_name}' at {self._ollama_host}")
 
-            # Test connection with timeout protection
-            logger.info(f"Testing connection to Ollama server...")
+            # Test connection with very lenient timeout
+            logger.info(f"Testing connection to Ollama server (patient mode)...")
             try:
-                # Use a timeout for the connection test
+                # Use a much more lenient timeout for connection test
                 import threading
                 import queue
                 result_queue = queue.Queue()
@@ -114,20 +106,20 @@ class OllamaAdapter(BackendInterface):
                 test_thread = threading.Thread(target=test_connection)
                 test_thread.daemon = True
                 test_thread.start()
-                test_thread.join(timeout=10.0)  # 10 second timeout for connection test
+                test_thread.join(timeout=30.0)  # Increased to 30 seconds for initial test
 
                 if test_thread.is_alive():
-                    self._last_error = f"Warning: Connection test timed out after 10s. Server might be slow but configured."
+                    self._last_error = f"Connection test taking longer than expected but continuing in patient mode."
                     logger.warning(self._last_error)
                 elif not exception_queue.empty():
                     e = exception_queue.get()
-                    self._last_error = f"Warning: Connection test failed: {e}. Will retry during actual requests."
+                    self._last_error = f"Connection test warning: {e}. Will retry during actual requests."
                     logger.warning(self._last_error)
                 else:
-                    logger.info(f"Successfully connected to Ollama and listed models at {self._ollama_host}.")
+                    logger.info(f"Successfully connected to Ollama at {self._ollama_host} in patient mode.")
 
             except Exception as conn_err:
-                self._last_error = f"Warning: Connection test error: {conn_err}. Will retry during requests."
+                self._last_error = f"Connection test warning: {conn_err}. Will proceed with patient retries."
                 logger.warning(self._last_error)
 
             return True
@@ -148,7 +140,7 @@ class OllamaAdapter(BackendInterface):
     async def get_response_stream(self, history: List[ChatMessage], options: Optional[Dict[str, Any]] = None) -> \
     AsyncGenerator[str, None]:
         logger.info(
-            f"OllamaAdapter: Generating stream with enhanced timeout handling. Model: {self._model_name}, History items: {len(history)}")
+            f"OllamaAdapter: Starting PATIENT streaming with NO TIMEOUTS. Model: {self._model_name}, History: {len(history)} items")
         self._last_error = None
         self._last_prompt_tokens = None
         self._last_completion_tokens = None
@@ -164,79 +156,55 @@ class OllamaAdapter(BackendInterface):
             logger.error(self._last_error)
             raise ValueError(self._last_error)
 
-        logger.debug(f"Sending {len(messages_for_api)} formatted messages to model '{self._model_name}'.")
+        logger.debug(f"Sending {len(messages_for_api)} formatted messages to model '{self._model_name}' with infinite patience.")
 
         ollama_api_options: Dict[str, Any] = {}
         if options:
             if "temperature" in options and isinstance(options["temperature"], (float, int)):
                 ollama_api_options["temperature"] = float(options["temperature"])
 
-        # ENHANCED: Use the robust streaming with timeout handling
+        # ENHANCED: Use patient streaming with NO TIMEOUTS
         try:
-            async for chunk in self._stream_with_enhanced_timeout(messages_for_api, ollama_api_options):
+            async for chunk in self._stream_with_infinite_patience(messages_for_api, ollama_api_options):
                 yield chunk
         except Exception as e:
-            error_msg = f"Enhanced streaming error: {type(e).__name__} - {e}"
+            error_msg = f"Patient streaming error: {type(e).__name__} - {e}"
             self._last_error = error_msg
             logger.error(error_msg, exc_info=True)
             yield f"[SYSTEM ERROR: {error_msg}]"
 
-    async def _stream_with_enhanced_timeout(self, messages: List[Dict[str, Any]], options: Dict[str, Any]) -> AsyncGenerator[str, None]:
-        """Enhanced streaming with proper timeout and retry handling."""
+    async def _stream_with_infinite_patience(self, messages: List[Dict[str, Any]], options: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        """ENHANCED: Streaming with infinite patience and NO TIMEOUTS for complex RAG requests."""
 
-        max_retries = 2
-        chunk_timeout = 25.0  # Timeout for individual chunks
-        total_timeout = 180.0  # Total timeout for entire request
-        retry_delay = 3.0
+        max_retries = 5  # Increased retries
+        retry_delay = 5.0  # Initial retry delay
 
         for attempt in range(max_retries + 1):
             try:
-                logger.info(f"Starting Ollama stream attempt {attempt + 1}/{max_retries + 1}")
+                logger.info(f"Starting Ollama stream attempt {attempt + 1}/{max_retries + 1} with INFINITE patience")
 
                 start_time = asyncio.get_event_loop().time()
-                last_chunk_time = start_time
                 chunk_count = 0
 
-                # Create the stream with timeout protection
-                stream_creation_task = asyncio.create_task(
-                    self._create_ollama_stream(messages, options)
-                )
-
+                # Create the stream with NO TIMEOUT PROTECTION
                 try:
-                    # Wait for stream creation with timeout
-                    ollama_sync_iterator = await asyncio.wait_for(stream_creation_task, timeout=15.0)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Stream creation timed out on attempt {attempt + 1}")
+                    ollama_sync_iterator = await self._create_ollama_stream_patient(messages, options)
+                except Exception as e:
+                    logger.warning(f"Stream creation failed on attempt {attempt + 1}: {e}")
                     if attempt < max_retries:
                         await asyncio.sleep(retry_delay)
+                        retry_delay *= 1.5  # Exponential backoff
                         continue
-                    raise OllamaStreamTimeoutError("Failed to create stream after all retries")
+                    raise
 
-                # Process the stream with chunk-level timeouts
+                # Process the stream with INFINITE PATIENCE
                 loop = asyncio.get_running_loop()
 
                 while True:
-                    current_time = loop.time()
-
-                    # Check total timeout
-                    if current_time - start_time > total_timeout:
-                        raise OllamaStreamTimeoutError(f"Total streaming time exceeded {total_timeout}s")
-
-                    # Check chunk timeout
-                    if current_time - last_chunk_time > chunk_timeout:
-                        raise OllamaStreamTimeoutError(f"No chunk received in {chunk_timeout}s")
-
                     try:
-                        # FIX: Don't use create_task with the future from run_in_executor
-                        # Instead, use await directly on the future
-                        try:
-                            chunk_future = loop.run_in_executor(None, self._get_next_chunk, ollama_sync_iterator)
-                            chunk_data_obj = await asyncio.wait_for(chunk_future, timeout=chunk_timeout)
-                        except asyncio.TimeoutError:
-                            logger.warning(f"Chunk timeout after {chunk_count} chunks on attempt {attempt + 1}")
-                            if attempt < max_retries:
-                                break  # Try next attempt
-                            raise OllamaStreamTimeoutError(f"Chunk timeout after {max_retries + 1} attempts")
+                        # NO TIMEOUT - wait forever for chunks
+                        chunk_future = loop.run_in_executor(None, self._get_next_chunk, ollama_sync_iterator)
+                        chunk_data_obj = await chunk_future  # NO TIMEOUT HERE
 
                         if chunk_data_obj is None:  # Stream ended normally
                             logger.info(f"Ollama stream ended normally after {chunk_count} chunks")
@@ -260,23 +228,20 @@ class OllamaAdapter(BackendInterface):
                         if content_part:
                             yield content_part
                             chunk_count += 1
-                            last_chunk_time = current_time
 
                         # Check if done
                         is_done = getattr(chunk_data_obj, 'done', False)
                         if is_done:
-                            logger.info(f"Ollama stream completed successfully. Chunks: {chunk_count}")
+                            logger.info(f"Ollama stream completed successfully with infinite patience. Chunks: {chunk_count}")
                             # Extract token usage
                             self._last_prompt_tokens = getattr(chunk_data_obj, 'prompt_eval_count', None)
                             self._last_completion_tokens = getattr(chunk_data_obj, 'eval_count', None)
                             return
 
                     except Exception as e:
-                        if isinstance(e, OllamaStreamTimeoutError) or isinstance(e, asyncio.TimeoutError):
-                            raise
-                        logger.error(f"Error processing chunk: {e}", exc_info=True)
+                        logger.error(f"Error processing chunk on attempt {attempt + 1}: {e}", exc_info=True)
                         if attempt < max_retries:
-                            break
+                            break  # Try next attempt
                         else:
                             raise
 
@@ -286,21 +251,18 @@ class OllamaAdapter(BackendInterface):
                 # If we got here, this attempt failed but we're retrying
                 continue
 
-            except (OllamaStreamTimeoutError, asyncio.TimeoutError) as timeout_error:
-                logger.warning(f"Timeout on attempt {attempt + 1}: {timeout_error}")
+            except Exception as e:
+                logger.warning(f"Error on patient attempt {attempt + 1}: {e}")
                 if attempt < max_retries:
-                    logger.info(f"Retrying in {retry_delay}s...")
+                    logger.info(f"Retrying with infinite patience in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 1.5  # Exponential backoff
                 else:
-                    raise OllamaStreamTimeoutError(f"All retry attempts failed: {timeout_error}")
+                    logger.error(f"All retry attempts failed even with infinite patience: {e}")
+                    raise
 
-            except Exception as e:
-                logger.error(f"Non-timeout error on attempt {attempt + 1}: {e}", exc_info=True)
-                raise
-
-    async def _create_ollama_stream(self, messages: List[Dict[str, Any]], options: Dict[str, Any]):
-        """Create the Ollama stream iterator with timeout protection."""
+    async def _create_ollama_stream_patient(self, messages: List[Dict[str, Any]], options: Dict[str, Any]):
+        """Create the Ollama stream iterator with patient settings."""
         loop = asyncio.get_running_loop()
 
         def _sync_create_stream():
@@ -314,11 +276,11 @@ class OllamaAdapter(BackendInterface):
         try:
             return await loop.run_in_executor(None, _sync_create_stream)
         except Exception as e:
-            logger.error(f"Failed to create Ollama stream: {e}")
+            logger.error(f"Failed to create patient Ollama stream: {e}")
             raise
 
     def _get_next_chunk(self, stream_iterator):
-        """Get the next chunk from stream iterator (synchronous)."""
+        """Get the next chunk from stream iterator (synchronous) with patience."""
         try:
             return next(stream_iterator)
         except StopIteration:
@@ -328,7 +290,7 @@ class OllamaAdapter(BackendInterface):
             raise
 
     def get_available_models(self) -> List[str]:
-        """Get available models with enhanced timeout protection."""
+        """Get available models with very patient timeout protection."""
         self._last_error = None
         if not API_LIBRARY_AVAILABLE:
             self._last_error = "Ollama library not installed."
@@ -339,9 +301,9 @@ class OllamaAdapter(BackendInterface):
         # Use multiple approaches for robustness
         success = False
 
-        # Approach 1: Direct API call
+        # Approach 1: Direct API call with increased timeout
         try:
-            response = requests.get(f"{self._ollama_host}/api/tags", timeout=15)
+            response = requests.get(f"{self._ollama_host}/api/tags", timeout=60)  # Increased to 60 seconds
             if response.status_code == 200:
                 data = response.json()
                 if 'models' in data:
@@ -349,11 +311,11 @@ class OllamaAdapter(BackendInterface):
                         if isinstance(model_item, dict) and 'name' in model_item:
                             model_names.append(model_item['name'])
                     success = True
-                    logger.info(f"Successfully fetched {len(model_names)} models via direct API")
+                    logger.info(f"Successfully fetched {len(model_names)} models via patient direct API")
         except Exception as e:
-            logger.warning(f"Direct API approach failed: {e}")
+            logger.warning(f"Patient direct API approach failed: {e}")
 
-        # Approach 2: Ollama library with timeout (fallback)
+        # Approach 2: Ollama library with very patient timeout (fallback)
         if not success and self._sync_client:
             try:
                 import threading
@@ -372,13 +334,13 @@ class OllamaAdapter(BackendInterface):
                 fetch_thread = threading.Thread(target=fetch_models_thread)
                 fetch_thread.daemon = True
                 fetch_thread.start()
-                fetch_thread.join(timeout=15.0)  # 15 second timeout
+                fetch_thread.join(timeout=60.0)  # Increased to 60 seconds
 
                 if fetch_thread.is_alive():
-                    logger.warning("Ollama model fetch timed out after 15 seconds")
+                    logger.warning("Ollama model fetch taking longer than 60 seconds, using defaults")
                 elif not exception_queue.empty():
                     e_fetch = exception_queue.get()
-                    logger.warning(f"Error fetching models via library: {e_fetch}")
+                    logger.warning(f"Error fetching models via patient library: {e_fetch}")
                 elif not result_queue.empty():
                     models_response_data = result_queue.get()
                     # Parse response
@@ -399,16 +361,16 @@ class OllamaAdapter(BackendInterface):
                             model_names.append(model_id)
 
                     success = True
-                    logger.info(f"Fetched {len(model_names)} models using library with timeout")
+                    logger.info(f"Fetched {len(model_names)} models using patient library")
 
             except Exception as e_lib:
-                logger.warning(f"Library approach also failed: {e_lib}")
+                logger.warning(f"Patient library approach also failed: {e_lib}")
 
         # Combine with defaults
         if model_names:
             combined_list = list(set(model_names + self._get_default_model_list()))
         else:
-            logger.warning("No models fetched from Ollama, using defaults only")
+            logger.warning("No models fetched from Ollama even with patience, using defaults only")
             combined_list = self._get_default_model_list()
 
         # Sort and return
@@ -418,7 +380,7 @@ class OllamaAdapter(BackendInterface):
             final_model_list.insert(0, self._model_name)
             final_model_list = sorted(final_model_list, key=self._sort_key_ollama)
 
-        logger.info(f"Returning {len(final_model_list)} total models")
+        logger.info(f"Returning {len(final_model_list)} total models with patient processing")
         return final_model_list
 
     def _get_default_model_list(self) -> List[str]:
@@ -482,7 +444,7 @@ class OllamaAdapter(BackendInterface):
         )
 
     def _format_history_for_api(self, history: List[ChatMessage]) -> List[Dict[str, Any]]:
-        """Format history for Ollama API - same as before but with better error handling."""
+        """Format history for Ollama API with enhanced error handling."""
         ollama_messages: List[Dict[str, Any]] = []
 
         if self._system_prompt:

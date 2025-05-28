@@ -1,4 +1,4 @@
-# core/chat_manager.py - Key fixes for async RAG and auto LLM terminal
+# core/chat_manager.py - Enhanced with code streaming and flexible timeouts
 import asyncio
 import logging
 import os
@@ -49,6 +49,9 @@ class ChatManager(QObject):
         self._upload_service = self._orchestrator.get_upload_service()
         self._rag_handler = self._orchestrator.get_rag_handler()
 
+        # NEW: Code streaming state
+        self._active_code_streams: Dict[str, Dict[str, Any]] = {}
+        # Structure: {request_id: {'block_id': str, 'is_streaming_code': bool, 'code_fence_count': int}}
 
         if not isinstance(self._project_manager, ProjectManager):
             logger.critical("ChatManager received an invalid ProjectManager instance.")
@@ -88,6 +91,9 @@ class ChatManager(QObject):
         self._current_llm_request_id: Optional[str] = None
         self._file_creation_request_ids: Dict[str, str] = {}
         self._llm_terminal_opened: bool = False
+
+        # NEW: Connect to streaming signals
+        self._backend_coordinator.llmStreamChunkReceived.connect(self._handle_llm_stream_chunk)
 
         self._connect_event_bus_subscriptions()
         logger.info("ChatManager initialized and subscriptions connected.")
@@ -148,6 +154,9 @@ class ChatManager(QObject):
             self._event_bus.hideLoader.emit()
 
         self._file_creation_request_ids.clear()
+        # NEW: Clean up active code streams
+        self._active_code_streams.clear()
+
         self._event_bus.activeSessionHistoryCleared.emit(project_id, session_id)
         self._event_bus.activeSessionHistoryLoaded.emit(project_id, session_id, self._current_chat_history)
         self._emit_status_update(f"Switched to session.", "#98c379", True, 2000)
@@ -167,6 +176,64 @@ class ChatManager(QObject):
         self._event_bus.requestRagScanDirectory.connect(self.request_global_rag_scan_directory)
         self._event_bus.requestProjectFilesUpload.connect(self.handle_project_files_upload_request)
         logger.debug("ChatManager EventBus subscriptions connected.")
+
+    # NEW: Code streaming handler
+    @Slot(str, str)
+    def _handle_llm_stream_chunk(self, request_id: str, chunk: str):
+        """Handle streaming chunks and detect code blocks for real-time display"""
+        if request_id not in self._active_code_streams:
+            # Initialize streaming state for this request
+            self._active_code_streams[request_id] = {
+                'block_id': None,
+                'is_streaming_code': False,
+                'code_fence_count': 0,
+                'language_hint': 'python',
+                'accumulated_chunk': ''
+            }
+
+        stream_state = self._active_code_streams[request_id]
+
+        # Accumulate chunks to handle split markers
+        stream_state['accumulated_chunk'] += chunk
+
+        # Check for code fence markers
+        fence_pattern = r'```(\w+)?'
+        matches = list(re.finditer(fence_pattern, stream_state['accumulated_chunk']))
+
+        if matches:
+            for match in matches:
+                stream_state['code_fence_count'] += 1
+
+                if stream_state['code_fence_count'] % 2 == 1:  # Opening fence
+                    # Start streaming code
+                    language = match.group(1) or 'python'
+                    stream_state['language_hint'] = language
+                    stream_state['is_streaming_code'] = True
+
+                    if self._llm_comm_logger:
+                        block_id = self._llm_comm_logger.start_streaming_code_block(language)
+                        stream_state['block_id'] = block_id
+
+                    logger.info(f"Started code streaming for request {request_id} ({language})")
+
+                else:  # Closing fence
+                    # Stop streaming code
+                    if stream_state['block_id'] and self._llm_comm_logger:
+                        self._llm_comm_logger.finish_streaming_code_block(stream_state['block_id'])
+
+                    stream_state['is_streaming_code'] = False
+                    stream_state['block_id'] = None
+                    logger.info(f"Finished code streaming for request {request_id}")
+
+            # Reset accumulated chunk after processing
+            stream_state['accumulated_chunk'] = ''
+
+        # If we're actively streaming code, send the chunk to the logger
+        elif stream_state['is_streaming_code'] and stream_state['block_id'] and self._llm_comm_logger:
+            # Clean the chunk of fence markers for display
+            clean_chunk = re.sub(r'```\w*', '', chunk)
+            if clean_chunk:
+                self._llm_comm_logger.stream_code_chunk(stream_state['block_id'], clean_chunk)
 
     def _emit_status_update(self, message: str, color: str, is_temporary: bool = False, duration_ms: int = 0):
         self._event_bus.uiStatusUpdateGlobal.emit(message, color, is_temporary, duration_ms)
@@ -279,7 +346,7 @@ class ChatManager(QObject):
                                            available_models: list):
         is_active_chat = (backend_id == self._active_chat_backend_id and model_name == self._active_chat_model_name)
         is_active_spec = (
-                    backend_id == self._active_specialized_backend_id and model_name == self._active_specialized_model_name)
+                backend_id == self._active_specialized_backend_id and model_name == self._active_specialized_model_name)
 
         if backend_id == self._active_chat_backend_id:
             self._is_chat_backend_configured = is_configured
@@ -404,43 +471,9 @@ class ChatManager(QObject):
                                                             "project_id": self._current_project_id,
                                                             "session_id": self._current_session_id})
 
-    def _handle_file_creation_request(self, user_msg_txt: str, filename: Optional[str]):
-        if not self._is_chat_backend_configured:  # Check active chat backend
-            self._emit_status_update("Chat backend not configured for file creation.", "#e06c75", True, 3000)
-            return
-        if not filename:
-            filename = self._detect_file_creation_intent(user_msg_txt)
-            if not filename:
-                asyncio.create_task(self._handle_normal_chat_async(user_msg_txt, []))
-                return
-        self._event_bus.showLoader.emit(f"Crafting {filename}...")
-        logger.info(f"CM: Handling file creation request for '{filename}' using '{self._active_chat_backend_id}'")
-        file_creation_prompt = self._create_file_creation_prompt(user_msg_txt, filename)
-        history_for_llm = [ChatMessage(role=USER_ROLE, parts=[file_creation_prompt])]
-        success, err, req_id = self._backend_coordinator.initiate_llm_chat_request(self._active_chat_backend_id,
-                                                                                   history_for_llm,
-                                                                                   {"temperature": 0.2})
-        if not success or not req_id:
-            err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[f"[Error creating file: {err}]"])
-            self._current_chat_history.append(err_msg_obj)
-            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
-                                                          err_msg_obj)
-            self._emit_status_update(f"Failed to start file creation: {err or 'Unknown'}", "#FF6B6B")
-            self._event_bus.hideLoader.emit()
-            return
-        self._file_creation_request_ids[req_id] = filename
-        self._current_llm_request_id = req_id
-        placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""], loading_state=MessageLoadingState.LOADING)
-        self._current_chat_history.append(placeholder)
-        self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
-        self._backend_coordinator.start_llm_streaming_task(req_id, self._active_chat_backend_id, history_for_llm, False,
-                                                           {"temperature": 0.2}, {"purpose": "file_creation",
-                                                                                  "project_id": self._current_project_id,
-                                                                                  "session_id": self._current_session_id,
-                                                                                  "filename": filename})
 
     def _handle_plan_then_code_request(self, user_msg_txt: str):
-        """Enhanced plan-then-code request handling with better error recovery."""
+        """Enhanced plan-then-code request handling with better error recovery and NO TIMEOUTS."""
         if not self._is_chat_backend_configured or not self._is_specialized_backend_configured:
             self._emit_status_update("Both Chat and Specialized LLMs must be configured for autonomous coding.",
                                      "#e06c75", True, 5000)
@@ -457,7 +490,7 @@ class ChatManager(QObject):
             self._emit_status_update("Autonomous coding already in progress. Please wait.", "#e5c07b", True, 3000)
             return
 
-        # Use the streamlined coordinator
+        # Use the streamlined coordinator with NO TIMEOUTS
         try:
             success = self._plan_and_code_coordinator.start_autonomous_coding(
                 user_query=user_msg_txt,
@@ -646,6 +679,14 @@ class ChatManager(QObject):
         meta_sid = usage_stats_dict.get("session_id")
         purpose = usage_stats_dict.get("purpose")
 
+        # Clean up code streaming state for this request
+        if request_id in self._active_code_streams:
+            stream_state = self._active_code_streams[request_id]
+            if stream_state['is_streaming_code'] and stream_state['block_id'] and self._llm_comm_logger:
+                # Finalize any unfinished code block
+                self._llm_comm_logger.finish_streaming_code_block(stream_state['block_id'])
+            del self._active_code_streams[request_id]
+
         if request_id == self._current_llm_request_id and meta_pid == self._current_project_id and meta_sid == self._current_session_id:
             self._event_bus.hideLoader.emit()
 
@@ -732,6 +773,14 @@ class ChatManager(QObject):
 
     @Slot(str, str)
     def _handle_llm_response_error(self, request_id: str, error_message_str: str):
+        # Clean up code streaming state for this request
+        if request_id in self._active_code_streams:
+            stream_state = self._active_code_streams[request_id]
+            if stream_state['is_streaming_code'] and stream_state['block_id'] and self._llm_comm_logger:
+                # Cancel the streaming block
+                self._llm_comm_logger.finish_streaming_code_block(stream_state['block_id'])
+            del self._active_code_streams[request_id]
+
         if request_id == self._current_llm_request_id:
             self._event_bus.hideLoader.emit()
             self._log_llm_comm(f"{self._active_chat_backend_id.upper()} ERROR", error_message_str)
@@ -791,11 +840,16 @@ class ChatManager(QObject):
                 global_size = self._upload_service._vector_db_service.get_collection_size(
                     constants.GLOBAL_COLLECTION_ID)
                 if global_size == -1:
-                    rag_status_message = "Global RAG: DB Error"; rag_status_color = "#e06c75"
+                    rag_status_message = "Global RAG: DB Error"
+                    rag_status_color = "#e06c75"
                 elif global_size == 0:
-                    rag_status_message = "Global RAG: Ready (Empty)"; rag_status_color = "#e5c07b"; current_context_rag_ready = True
+                    rag_status_message = "Global RAG: Ready (Empty)"
+                    rag_status_color = "#e5c07b"
+                    current_context_rag_ready = True
                 else:
-                    rag_status_message = f"Global RAG: Ready ({global_size} chunks)"; rag_status_color = "#98c379"; current_context_rag_ready = True
+                    rag_status_message = f"Global RAG: Ready ({global_size} chunks)"
+                    rag_status_color = "#98c379"
+                    current_context_rag_ready = True
         else:
             project_name_display = self._project_manager.get_project_by_id(self._current_project_id)
             project_display_name = project_name_display.name[:15] if project_name_display else self._current_project_id[
@@ -806,11 +860,16 @@ class ChatManager(QObject):
             else:
                 project_size = self._upload_service._vector_db_service.get_collection_size(self._current_project_id)
                 if project_size == -1:
-                    rag_status_message = f"RAG for '{project_display_name}...': DB Error"; rag_status_color = "#e06c75"
+                    rag_status_message = f"RAG for '{project_display_name}...': DB Error"
+                    rag_status_color = "#e06c75"
                 elif project_size == 0:
-                    rag_status_message = f"RAG for '{project_display_name}...': Ready (Empty)"; rag_status_color = "#e5c07b"; current_context_rag_ready = True
+                    rag_status_message = f"RAG for '{project_display_name}...': Ready (Empty)"
+                    rag_status_color = "#e5c07b"
+                    current_context_rag_ready = True
                 else:
-                    rag_status_message = f"RAG for '{project_display_name}...': Ready ({project_size} chunks)"; rag_status_color = "#98c379"; current_context_rag_ready = True
+                    rag_status_message = f"RAG for '{project_display_name}...': Ready ({project_size} chunks)"
+                    rag_status_color = "#98c379"
+                    current_context_rag_ready = True
         self._is_rag_ready = current_context_rag_ready
         logger.info(f"CM: Emitting RAG Status: OverallReady={self._is_rag_ready}, Msg='{rag_status_message}'")
         self._event_bus.ragStatusChanged.emit(self._is_rag_ready, rag_status_message, rag_status_color)
@@ -899,3 +958,46 @@ class ChatManager(QObject):
         if self._current_llm_request_id: self._backend_coordinator.cancel_current_task(
             self._current_llm_request_id); self._current_llm_request_id = None
         self._event_bus.hideLoader.emit()
+
+        # NEW: Clean up code streaming
+        if self._active_code_streams:
+            logger.info(f"Cleaning up {len(self._active_code_streams)} active code streams")
+            for request_id, stream_state in self._active_code_streams.items():
+                if stream_state['is_streaming_code'] and stream_state['block_id'] and self._llm_comm_logger:
+                    self._llm_comm_logger.finish_streaming_code_block(stream_state['block_id'])
+            self._active_code_streams.clear()
+
+    def _handle_file_creation_request(self, user_msg_txt: str, filename: Optional[str]):
+        if not self._is_chat_backend_configured:  # Check active chat backend
+            self._emit_status_update("Chat backend not configured for file creation.", "#e06c75", True, 3000)
+            return
+        if not filename:
+            filename = self._detect_file_creation_intent(user_msg_txt)
+            if not filename:
+                asyncio.create_task(self._handle_normal_chat_async(user_msg_txt, []))
+                return
+        self._event_bus.showLoader.emit(f"Crafting {filename}...")
+        logger.info(f"CM: Handling file creation request for '{filename}' using '{self._active_chat_backend_id}'")
+        file_creation_prompt = self._create_file_creation_prompt(user_msg_txt, filename)
+        history_for_llm = [ChatMessage(role=USER_ROLE, parts=[file_creation_prompt])]
+        success, err, req_id = self._backend_coordinator.initiate_llm_chat_request(self._active_chat_backend_id,
+                                                                                   history_for_llm,
+                                                                                   {"temperature": 0.2})
+        if not success or not req_id:
+            err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[f"[Error creating file: {err}]"])
+            self._current_chat_history.append(err_msg_obj)
+            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+                                                          err_msg_obj)
+            self._emit_status_update(f"Failed to start file creation: {err or 'Unknown'}", "#FF6B6B")
+            self._event_bus.hideLoader.emit()
+            return
+        self._file_creation_request_ids[req_id] = filename
+        self._current_llm_request_id = req_id
+        placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""], loading_state=MessageLoadingState.LOADING)
+        self._current_chat_history.append(placeholder)
+        self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
+        self._backend_coordinator.start_llm_streaming_task(req_id, self._active_chat_backend_id, history_for_llm, False,
+                                                           {"temperature": 0.2}, {"purpose": "file_creation",
+                                                                                  "project_id": self._current_project_id,
+                                                                                  "session_id": self._current_session_id,
+                                                                                  "filename": filename})
