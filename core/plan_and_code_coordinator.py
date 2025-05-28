@@ -410,83 +410,6 @@ class PlanAndCodeCoordinator(QObject):
             logger.warning("PACC: No valid coder tasks were started after dispatch attempt.")
             self._handle_all_coder_tasks_done()  # This will then lead to final completion
 
-    async def _generate_single_file_code_async(self, filename: str, instructions: str):
-        if not self._specialized_llm_backend_id or not self._specialized_llm_model_name:
-            logger.error("PACC: Specialized LLM details not set. Cannot generate code for {filename}.")
-            self._generated_code_map[filename] = (None, "Specialized LLM (Coder) not configured.")
-            self._emit_system_message_to_chat(f"[System Error: Code LLM not configured. Cannot generate `{filename}`.]",
-                                              is_error=True)
-            # If this is the last file and it fails here, need to ensure sequence finishes.
-            # Check if this was the only file or if others are pending.
-            if not self._active_coder_request_ids and filename in self._parsed_files_list and self._parsed_files_list.index(
-                    filename) == len(self._parsed_files_list) - 1:
-                self._handle_all_coder_tasks_done()
-            return
-
-        coder_request_id = f"coder_req_{filename.replace('/', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
-        self._active_coder_request_ids[coder_request_id] = filename  # Add before starting task
-
-        self._log_comm("CODER_REQ", f"Requesting code for: {filename} (CoderReqID: {coder_request_id})")
-
-        # --- ADD CODER PLACEHOLDER MESSAGE ---
-        if self._current_project_id and self._current_session_id:
-            coder_placeholder_text = f"[System: Code LLM ({self._specialized_llm_model_name}) is generating code for `{filename}`... ⏳]"
-            coder_placeholder_msg = ChatMessage(
-                id=coder_request_id,  # Use coder's request ID
-                role=MODEL_ROLE,
-                parts=[coder_placeholder_text],
-                loading_state=MessageLoadingState.LOADING,  # type: ignore
-                metadata={"purpose": "plan_and_code_coder_placeholder", "filename": filename,
-                          "pacc_request_id": coder_request_id}
-            )
-            self._event_bus.newMessageAddedToHistory.emit(
-                self._current_project_id,
-                self._current_session_id,
-                coder_placeholder_msg
-            )
-            self._log_comm("UI_MSG_ADD", f"Coder placeholder sent for {filename}, ReqID: {coder_request_id}")
-        else:
-            logger.warning(f"PACC: No P/S context, cannot send coder placeholder for {filename} to UI.")
-        # --- END CODER PLACEHOLDER ---
-
-        # NEW: Create task-specific prompts for individual files
-        file_task_type = self._detect_file_task_type(filename, instructions)
-
-        base_coder_prompt = f"Based on the following instructions, generate the complete Python code for the file `{filename}`.\n\n--- INSTRUCTIONS ---\n{instructions}\n--- END INSTRUCTIONS ---"
-
-        # Add task-specific guidance for the coder
-        if file_task_type == 'api':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.API_DEVELOPMENT_PROMPT}"
-        elif file_task_type == 'data_processing':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.DATA_PROCESSING_PROMPT}"
-        elif file_task_type == 'ui':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.UI_DEVELOPMENT_PROMPT}"
-        elif file_task_type == 'utility':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.UTILITY_DEVELOPMENT_PROMPT}"
-        else:
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.GENERAL_CODING_PROMPT}"
-
-        coder_prompt_text = base_coder_prompt + task_specific_guidance
-        logger.info(f"PACC: Using {file_task_type} prompt for {filename}")
-
-        history_for_coder = [ChatMessage(role=USER_ROLE, parts=[coder_prompt_text])]  # type: ignore
-
-        self._backend_coordinator.start_llm_streaming_task(
-            request_id=coder_request_id,
-            target_backend_id=self._specialized_llm_backend_id,
-            history_to_send=history_for_coder,
-            is_modification_response_expected=True,
-            options={"temperature": 0.2},  # Lower temp for more deterministic code
-            request_metadata={
-                "purpose": "plan_and_code_coder",
-                "pacc_request_id": coder_request_id,  # Ensure PACC ID is passed
-                "filename": filename,
-                "project_id": self._current_project_id,
-                "session_id": self._current_session_id
-            }
-        )
-        logger.info(f"PACC: Started code generation task for {filename} (ReqID: {coder_request_id})")
-
     def _handle_all_coder_tasks_done(self):
         logger.info("PACC: All coder tasks have completed (or errored). Preparing for validation or finalization.")
         self._log_comm("CODERS_DONE", "All individual file generation tasks finished.")
@@ -710,10 +633,276 @@ class PlanAndCodeCoordinator(QObject):
         # This is now handled by _handle_final_completion emitting uiInputBarBusyStateChanged(False)
         self._log_comm("SEQ_RESET", "Sequence state has been fully reset.")
 
+    def _extract_code_from_response(self, raw_response: str, filename: str) -> Optional[str]:
+        """
+        Enhanced code extraction with multiple fallback strategies.
+
+        Args:
+            raw_response: Raw response from Code LLM
+            filename: Target filename for context
+
+        Returns:
+            Extracted code or None if no valid code found
+        """
+        if not raw_response or not raw_response.strip():
+            logger.warning(f"PACC: Empty response received for {filename}")
+            return None
+
+        # Strategy 1: Look for fenced code blocks with various patterns
+        fenced_patterns = [
+            r"```python\n(.*?)```",  # Standard python fenced block
+            r"```py\n(.*?)```",  # Short python fenced block
+            r"```\n(.*?)```",  # Generic fenced block
+            r"```[a-zA-Z]*\n(.*?)```",  # Any language fenced block
+            r"~~~python\n(.*?)~~~",  # Alternative fencing with tildes
+            r"~~~\n(.*?)~~~",  # Generic tilde fencing
+        ]
+
+        for pattern in fenced_patterns:
+            match = re.search(pattern, raw_response, re.DOTALL | re.IGNORECASE)
+            if match:
+                code = match.group(1).strip()
+                if self._is_valid_python_code(code, filename):
+                    logger.info(f"PACC: Found fenced code block for {filename} using pattern: {pattern}")
+                    return code
+
+        # Strategy 2: Look for code between common markers
+        marker_patterns = [
+            r"(?:Here\'s|Here is) the (?:complete )?code[^:]*:\s*\n(.*?)(?:\n\n|\Z)",
+            r"(?:Complete )?(?:Python )?[Cc]ode:\s*\n(.*?)(?:\n\n|\Z)",
+            r"(?:File|Implementation)(?: for [^:]+)?:\s*\n(.*?)(?:\n\n|\Z)",
+        ]
+
+        for pattern in marker_patterns:
+            match = re.search(pattern, raw_response, re.DOTALL | re.IGNORECASE)
+            if match:
+                code = match.group(1).strip()
+                if self._is_valid_python_code(code, filename):
+                    logger.info(f"PACC: Found marked code block for {filename}")
+                    return code
+
+        # Strategy 3: Look for the largest code-like block
+        lines = raw_response.split('\n')
+        code_lines = []
+        current_block = []
+        largest_block = []
+
+        for line in lines:
+            stripped_line = line.strip()
+
+            # Skip obvious non-code lines
+            if (stripped_line.startswith(('Here', 'The ', 'This ', 'I ', 'Let ', 'Note:', 'Please')) or
+                    '```' in stripped_line or
+                    stripped_line.endswith('?') or
+                    (stripped_line and not any(c in stripped_line for c in
+                                               ['=', '(', ')', '[', ']', '{', '}', ':', 'def ', 'class ', 'import ',
+                                                'from ']))):
+
+                if current_block and len(current_block) > len(largest_block):
+                    largest_block = current_block[:]
+                current_block = []
+                continue
+
+            # Collect potential code lines
+            if (stripped_line.startswith(('#', 'def ', 'class ', 'import ', 'from ', '@')) or
+                    any(keyword in stripped_line for keyword in
+                        ['=', 'return', 'if ', 'else:', 'elif ', 'for ', 'while ', 'try:', 'except', 'with ']) or
+                    (stripped_line and (stripped_line.startswith(' ') or stripped_line.startswith('\t')))):
+                current_block.append(line)
+            elif stripped_line:  # Non-empty line that might be code
+                current_block.append(line)
+
+        # Check the last block
+        if current_block and len(current_block) > len(largest_block):
+            largest_block = current_block[:]
+
+        if largest_block:
+            code = '\n'.join(largest_block).strip()
+            if self._is_valid_python_code(code, filename):
+                logger.info(f"PACC: Extracted largest code-like block for {filename}")
+                return code
+
+        # Strategy 4: Use entire response if it looks like pure code
+        if self._is_valid_python_code(raw_response.strip(), filename):
+            logger.info(f"PACC: Using entire response as code for {filename}")
+            return raw_response.strip()
+
+        logger.warning(f"PACC: Could not extract valid code for {filename} using any strategy")
+        return None
+
+    def _is_valid_python_code(self, code: str, filename: str) -> bool:
+        """
+        Check if the given string looks like valid Python code.
+
+        Args:
+            code: Code string to validate
+            filename: Filename for context
+
+        Returns:
+            True if code looks valid, False otherwise
+        """
+        if not code or len(code.strip()) < 10:
+            return False
+
+        # Must have some Python-like characteristics
+        python_indicators = [
+            'def ', 'class ', 'import ', 'from ',
+            'if __name__', 'return', '=', 'print(',
+            'try:', 'except', 'with ', 'for ', 'while ',
+            '#', '"""', "'''", 'self.', '__init__'
+        ]
+
+        # Count how many Python indicators are present
+        indicator_count = sum(1 for indicator in python_indicators if indicator in code)
+
+        # Need at least 2 indicators for short code, or 1 for longer code
+        min_indicators = 2 if len(code) < 100 else 1
+
+        if indicator_count < min_indicators:
+            logger.debug(
+                f"PACC: Code validation failed for {filename}: insufficient Python indicators ({indicator_count})")
+            return False
+
+        # Check for obvious non-code content
+        non_code_indicators = [
+            'Here is the', 'Here\'s the', 'The complete', 'This code',
+            'I hope this helps', 'Let me know', 'Please note',
+            'You can use', 'This should', 'Make sure to'
+        ]
+
+        code_lower = code.lower()
+        if any(indicator in code_lower for indicator in non_code_indicators):
+            # But allow if it's a small part of a larger code block
+            explanation_chars = sum(len(indicator) for indicator in non_code_indicators if indicator in code_lower)
+            if explanation_chars > len(code) * 0.1:  # More than 10% explanation text
+                logger.debug(f"PACC: Code validation failed for {filename}: too much explanatory text")
+                return False
+
+        # Try basic syntax validation
+        try:
+            import ast
+            ast.parse(code)
+            logger.debug(f"PACC: Code validation passed for {filename}: valid Python syntax")
+            return True
+        except SyntaxError:
+            # Might be a partial code block or have minor issues
+            # Check if it at least has proper indentation structure
+            lines = code.split('\n')
+            indented_lines = sum(1 for line in lines if line.startswith((' ', '\t')))
+
+            if indented_lines > 0:  # Has some indentation structure
+                logger.debug(
+                    f"PACC: Code validation passed for {filename}: has indentation structure despite syntax errors")
+                return True
+            else:
+                logger.debug(f"PACC: Code validation failed for {filename}: syntax error and no indentation")
+                return False
+        except Exception as e:
+            logger.debug(f"PACC: Code validation error for {filename}: {e}")
+            return False
+
+    # Also update the coder prompt construction to be more explicit
+    async def _generate_single_file_code_async(self, filename: str, instructions: str):
+        if not self._specialized_llm_backend_id or not self._specialized_llm_model_name:
+            logger.error("PACC: Specialized LLM details not set. Cannot generate code for {filename}.")
+            self._generated_code_map[filename] = (None, "Specialized LLM (Coder) not configured.")
+            self._emit_system_message_to_chat(f"[System Error: Code LLM not configured. Cannot generate `{filename}`.]",
+                                              is_error=True)
+            if not self._active_coder_request_ids and filename in self._parsed_files_list and self._parsed_files_list.index(
+                    filename) == len(self._parsed_files_list) - 1:
+                self._handle_all_coder_tasks_done()
+            return
+
+        coder_request_id = f"coder_req_{filename.replace('/', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
+        self._active_coder_request_ids[coder_request_id] = filename
+
+        self._log_comm("CODER_REQ", f"Requesting code for: {filename} (CoderReqID: {coder_request_id})")
+
+        # Add coder placeholder message
+        if self._current_project_id and self._current_session_id:
+            coder_placeholder_text = f"[System: Code LLM ({self._specialized_llm_model_name}) is generating code for `{filename}`... ⏳]"
+            coder_placeholder_msg = ChatMessage(
+                id=coder_request_id,
+                role=MODEL_ROLE,
+                parts=[coder_placeholder_text],
+                loading_state=MessageLoadingState.LOADING,
+                metadata={"purpose": "plan_and_code_coder_placeholder", "filename": filename,
+                          "pacc_request_id": coder_request_id}
+            )
+            self._event_bus.newMessageAddedToHistory.emit(
+                self._current_project_id,
+                self._current_session_id,
+                coder_placeholder_msg
+            )
+            self._log_comm("UI_MSG_ADD", f"Coder placeholder sent for {filename}, ReqID: {coder_request_id}")
+        else:
+            logger.warning(f"PACC: No P/S context, cannot send coder placeholder for {filename} to UI.")
+
+        # Create enhanced task-specific prompts
+        file_task_type = self._detect_file_task_type(filename, instructions)
+
+        # ENHANCED PROMPT WITH STRONGER CODE BLOCK REQUIREMENT
+        base_coder_prompt = f"""You are a Python code generation specialist. Generate COMPLETE, WORKING Python code for the file `{filename}`.
+
+    CRITICAL OUTPUT FORMAT REQUIREMENT:
+    - Respond with ONLY a single Python code block
+    - Use this EXACT format: ```python\\n[YOUR CODE HERE]\\n```
+    - NO explanatory text before or after the code block
+    - NO additional comments outside the code block
+
+    INSTRUCTIONS FOR {filename}:
+    {instructions}"""
+
+        # Add task-specific guidance
+        if file_task_type == 'api':
+            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.API_DEVELOPMENT_PROMPT}"
+        elif file_task_type == 'data_processing':
+            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.DATA_PROCESSING_PROMPT}"
+        elif file_task_type == 'ui':
+            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.UI_DEVELOPMENT_PROMPT}"
+        elif file_task_type == 'utility':
+            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.UTILITY_DEVELOPMENT_PROMPT}"
+        else:
+            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.GENERAL_CODING_PROMPT}"
+
+        # Final reminder about format
+        format_reminder = """
+
+    REMINDER - EXACT OUTPUT FORMAT REQUIRED:
+    ```python
+    # Your complete Python code here
+    # Include all necessary imports
+    # Include all classes and functions
+    # Include proper error handling
+    # Include docstrings and type hints
+    ```
+
+    Do NOT include any text outside the code block. Respond ONLY with the fenced code block."""
+
+        coder_prompt_text = base_coder_prompt + task_specific_guidance + format_reminder
+        logger.info(f"PACC: Using {file_task_type} prompt for {filename}")
+
+        history_for_coder = [ChatMessage(role=USER_ROLE, parts=[coder_prompt_text])]
+
+        self._backend_coordinator.start_llm_streaming_task(
+            request_id=coder_request_id,
+            target_backend_id=self._specialized_llm_backend_id,
+            history_to_send=history_for_coder,
+            is_modification_response_expected=True,
+            options={"temperature": 0.2},
+            request_metadata={
+                "purpose": "plan_and_code_coder",
+                "pacc_request_id": coder_request_id,
+                "filename": filename,
+                "project_id": self._current_project_id,
+                "session_id": self._current_session_id
+            }
+        )
+        logger.info(f"PACC: Started code generation task for {filename} (ReqID: {coder_request_id})")
+
     @Slot(str, ChatMessage, dict)  # type: ignore
     def _handle_llm_responses(self, request_id: str, completed_message: ChatMessage, usage_stats_dict: dict):
         purpose = usage_stats_dict.get("purpose")
-        # pacc_internal_req_id = usage_stats_dict.get("pacc_request_id") # Redundant if request_id is unique
 
         logger.info(f"PACC: LLM Response RECVD. ReqID: {request_id}, Purpose: {purpose}")
         self._log_comm("LLM_RESP",
@@ -766,58 +955,47 @@ class PlanAndCodeCoordinator(QObject):
                 self._reset_sequence_state()
 
         elif purpose == "plan_and_code_coder" and request_id in self._active_coder_request_ids:
-            filename = self._active_coder_request_ids.get(request_id, "unknown_file")  # Should always exist
+            filename = self._active_coder_request_ids.get(request_id, "unknown_file")
             logger.info(f"PACC: Received CODE from Code LLM for file '{filename}' (ReqID: {request_id})")
             self._log_comm("CODER_RECV", f"Code received for {filename}, ReqID: {request_id}")
 
-            raw_code_response = completed_message.text.strip() if completed_message.text else ""  # type: ignore
+            raw_code_response = completed_message.text.strip() if completed_message.text else ""
             logger.debug(
-                f"PACC: Raw code response for {filename} (length: {len(raw_code_response)} chars): '{raw_code_response[:100]}...'")
+                f"PACC: Raw code response for {filename} (length: {len(raw_code_response)} chars): '{raw_code_response[:200]}...'")
 
-            # Try to extract only the code block
-            # Pattern looks for ``` optional_lang then content then ```
-            code_block_match = re.search(r"```(?:[a-zA-Z0-9_\-.+#\s]*\n)?(.*?)```", raw_code_response,
-                                         re.DOTALL | re.IGNORECASE)
-            extracted_code: Optional[str] = None
-            if code_block_match:
-                extracted_code = code_block_match.group(1).strip()
+            # 🔥 THIS IS THE KEY - USE THE NEW ENHANCED CODE EXTRACTION LOGIC
+            extracted_code = self._extract_code_from_response(raw_code_response, filename)
+
+            if extracted_code:
                 self._generated_code_map[filename] = (extracted_code, None)
                 logger.info(f"PACC: Successfully extracted code for {filename} ({len(extracted_code)} chars)")
                 self._log_comm("CODE_EXTRACT_OK", f"Extracted code for {filename}")
+                final_coder_msg_text = f"[System: Code LLM finished generating `{filename}`. Code extracted successfully.]"
+                self._emit_system_message_to_chat(final_coder_msg_text, is_error=False, request_id_ref=request_id)
             else:
-                logger.warning(
-                    f"PACC: Could not extract fenced code block for '{filename}'. Storing raw response as code.")
-                self._log_comm("CODE_EXTRACT_WARN", f"No fenced block for {filename}. Using raw.")
-                # If no code block, store the raw response as is, it might be just code.
-                # But also flag it as a potential issue for later review if validation fails.
-                # Storing raw response IF it looks like code, otherwise mark as error
-                if len(raw_code_response) > 0 and (
-                        "def " in raw_code_response or "class " in raw_code_response or "import " in raw_code_response or raw_code_response.startswith(
-                        "#")):
-                    self._generated_code_map[filename] = (raw_code_response,
-                                                          "Warning: No fenced code block found, using raw response.")
-                else:
-                    self._generated_code_map[filename] = (None,
-                                                          "Error: No fenced code block found and raw response doesn't look like code.")
-
-            # Finalize the placeholder message for this coder task
-            final_coder_msg_text = f"[System: Code LLM finished generating `{filename}`. {'Proceeding...' if extracted_code else 'Error extracting code.'}]"
-            self._emit_system_message_to_chat(final_coder_msg_text, is_error=(not extracted_code),
-                                              request_id_ref=request_id)
+                # Store the raw response with an error message
+                self._generated_code_map[filename] = (raw_code_response,
+                                                      "Warning: Could not extract clean code, using raw response.")
+                logger.warning(f"PACC: Could not extract clean code for '{filename}', storing raw response")
+                self._log_comm("CODE_EXTRACT_FALLBACK", f"Using raw response for {filename}")
+                final_coder_msg_text = f"[System: Code LLM finished generating `{filename}`. Using raw response (no clean code block found).]"
+                self._emit_system_message_to_chat(final_coder_msg_text, is_error=False, request_id_ref=request_id)
 
             if request_id in self._active_coder_request_ids:
                 del self._active_coder_request_ids[request_id]
-            else:  # Should not happen
+            else:
                 logger.warning(
                     f"PACC: Coder ReqID {request_id} for file {filename} was not in _active_coder_request_ids when trying to remove.")
 
             logger.info(
                 f"PACC: Coder task for {filename} completed. Remaining active coder tasks: {len(self._active_coder_request_ids)}")
-            if not self._active_coder_request_ids:  # Check if all coder tasks are now done
+            if not self._active_coder_request_ids:
                 logger.info("PACC: All coder tasks seem to be completed. Proceeding to _handle_all_coder_tasks_done.")
                 self._handle_all_coder_tasks_done()
         else:
             logger.debug(f"PACC: Ignoring LLM response for unrelated ReqID/Purpose: {request_id} / {purpose}")
+
+
 
     @Slot(str, str)  # type: ignore
     def _handle_llm_errors(self, request_id: str, error_message: str):
