@@ -1,4 +1,4 @@
-# core/code_output_processor.py
+# core/code_output_processor.py - Optimized for speed and accuracy
 import logging
 import re
 import ast
@@ -13,7 +13,6 @@ class CodeExtractionStrategy(Enum):
     MARKED_SECTION = auto()
     LARGEST_BLOCK = auto()
     FULL_RESPONSE = auto()
-    OLLAMA_SPECIFIC = auto()
 
 
 class CodeQualityLevel(Enum):
@@ -26,99 +25,248 @@ class CodeQualityLevel(Enum):
 
 class CodeOutputProcessor:
     """
-    Dedicated processor for cleaning and extracting code from LLM responses.
-    Handles various LLM output formats and streaming response artifacts.
+    Optimized processor for cleaning and extracting code from LLM responses.
+    Focus on speed and accuracy for common patterns.
     """
 
     def __init__(self):
         self.logger = logger.getChild('CodeProcessor')
 
-        # Enhanced patterns for Ollama-specific artifacts
-        self.ollama_artifacts = [
-            r"```\s*(?:python|py)?\s*\n",  # Opening fences
-            r"\n\s*```\s*$",  # Closing fences
-            r"^Here'?s?\s+(?:the\s+)?(?:complete\s+)?(?:python\s+)?code.*?:\s*\n",
-            r"^(?:The\s+)?(?:complete\s+)?(?:Python\s+)?(?:code\s+)?(?:implementation\s+)?(?:for\s+.*?\s+)?(?:is|would\s+be).*?:\s*\n",
-            r"^I'?(?:ll|ve)\s+(?:create|write|implement).*?:\s*\n",
-            r"^(?:Below|Here)\s+is\s+(?:the\s+)?(?:complete\s+)?.*?:\s*\n",
-            r"\n\s*(?:This|That)\s+(?:code|implementation|solution).*?$",
-            r"\n\s*(?:Hope|Let\s+me\s+know)\s+.*?$",
-            r"\n\s*(?:Please|Make\s+sure)\s+.*?$",
+        # Pre-compiled regex patterns for performance
+        self._fenced_patterns = [
+            re.compile(r"```(?:python|py)?\s*\n(.*?)\n?\s*```", re.DOTALL | re.IGNORECASE),
+            re.compile(r"```\s*\n(.*?)\n?\s*```", re.DOTALL | re.IGNORECASE),
+            re.compile(r"~~~(?:python|py)?\s*\n(.*?)\n?\s*~~~", re.DOTALL | re.IGNORECASE),
         ]
 
-        # Compile patterns for performance
-        self.compiled_artifacts = [re.compile(pattern, re.IGNORECASE | re.MULTILINE)
-                                   for pattern in self.ollama_artifacts]
-
-        # Code block extraction patterns (ordered by preference)
-        self.code_patterns = [
-            (CodeExtractionStrategy.FENCED_BLOCK, [
-                r"```python\n(.*?)```",
-                r"```py\n(.*?)```",
-                r"```\n(.*?)```",
-                r"~~~python\n(.*?)~~~",
-                r"~~~\n(.*?)~~~"
-            ]),
-            (CodeExtractionStrategy.MARKED_SECTION, [
-                r"(?:Here'?s?\s+(?:the\s+)?(?:complete\s+)?code.*?:\s*\n)(.*?)(?=\n\n|\Z)",
-                r"(?:The\s+(?:complete\s+)?Python\s+code.*?:\s*\n)(.*?)(?=\n\n|\Z)",
-                r"(?:Implementation:\s*\n)(.*?)(?=\n\n|\Z)",
-                r"(?:Solution:\s*\n)(.*?)(?=\n\n|\Z)"
-            ])
+        # Fast cleanup patterns - most common LLM artifacts
+        self._cleanup_patterns = [
+            re.compile(r"^Here'?s?\s+(?:the\s+)?(?:complete\s+)?(?:python\s+)?code.*?:\s*\n",
+                       re.IGNORECASE | re.MULTILINE),
+            re.compile(
+                r"^(?:The\s+)?(?:complete\s+)?(?:Python\s+)?(?:code\s+)?(?:implementation\s+)?(?:for\s+.*?\s+)?(?:is|would\s+be).*?:\s*\n",
+                re.IGNORECASE | re.MULTILINE),
+            re.compile(r"^I'?(?:ll|ve)\s+(?:create|write|implement).*?:\s*\n", re.IGNORECASE | re.MULTILINE),
+            re.compile(r"\n\s*(?:This|That)\s+(?:code|implementation|solution).*?$", re.IGNORECASE | re.MULTILINE),
+            re.compile(r"\n\s*(?:Hope|Let\s+me\s+know).*?$", re.IGNORECASE | re.MULTILINE),
         ]
+
+        # Python keyword detection for fast validation
+        self._python_keywords = {
+            'def', 'class', 'import', 'from', 'return', 'if', 'else', 'elif',
+            'for', 'while', 'try', 'except', 'with', 'as', 'in', 'is', 'and',
+            'or', 'not', 'lambda', 'yield', 'async', 'await', 'pass', 'break', 'continue'
+        }
+
+        # Cache for repeated validations
+        self._validation_cache = {}
 
     def process_llm_response(self, raw_response: str, filename: str,
                              expected_language: str = "python") -> Tuple[Optional[str], CodeQualityLevel, List[str]]:
         """
-        Main entry point for processing LLM code responses.
-
-        Returns:
-            Tuple of (extracted_code, quality_level, processing_notes)
+        Optimized main entry point for processing LLM code responses.
+        Fast path for common patterns, fallback for edge cases.
         """
         if not raw_response or not raw_response.strip():
             return None, CodeQualityLevel.UNUSABLE, ["Empty response"]
 
         processing_notes = []
 
-        # Step 1: Clean Ollama-specific artifacts
-        cleaned_response = self._clean_ollama_artifacts(raw_response)
-        if cleaned_response != raw_response:
-            processing_notes.append("Removed Ollama streaming artifacts")
-
-        # Step 2: Try extraction strategies in order of preference
-        for strategy, patterns in self.code_patterns:
-            extracted_code = self._try_extraction_strategy(cleaned_response, patterns, strategy)
-            if extracted_code:
-                quality = self._assess_code_quality(extracted_code, filename)
-                processing_notes.append(f"Extracted using {strategy.name}")
-                return extracted_code, quality, processing_notes
-
-        # Step 3: Fallback to largest code-like block
-        extracted_code = self._extract_largest_code_block(cleaned_response)
+        # Fast path: Direct fenced block extraction (90% of cases)
+        extracted_code = self._fast_fenced_extraction(raw_response)
         if extracted_code:
             quality = self._assess_code_quality(extracted_code, filename)
-            processing_notes.append("Extracted largest code-like block")
+            processing_notes.append("Fast fenced block extraction")
             return extracted_code, quality, processing_notes
 
-        # Step 4: Last resort - use entire response if it looks like code
-        if self._looks_like_pure_code(cleaned_response):
-            quality = self._assess_code_quality(cleaned_response, filename)
-            processing_notes.append("Used entire response as code")
-            return cleaned_response.strip(), quality, processing_notes
+        # Fallback: Clean and try again
+        cleaned_response = self._fast_cleanup(raw_response)
+        if cleaned_response != raw_response:
+            processing_notes.append("Applied cleanup")
 
-        return None, CodeQualityLevel.UNUSABLE, processing_notes + ["No valid code found"]
+            extracted_code = self._fast_fenced_extraction(cleaned_response)
+            if extracted_code:
+                quality = self._assess_code_quality(extracted_code, filename)
+                processing_notes.append("Extracted after cleanup")
+                return extracted_code, quality, processing_notes
 
-    def _clean_ollama_artifacts(self, response: str) -> str:
-        """Remove common Ollama streaming artifacts and explanatory text."""
+        # Last resort: Comprehensive extraction
+        return self._comprehensive_extraction(cleaned_response, filename, processing_notes)
+
+    def _fast_fenced_extraction(self, text: str) -> Optional[str]:
+        """Optimized fenced block extraction using pre-compiled patterns."""
+        largest_block = ""
+
+        for pattern in self._fenced_patterns:
+            matches = pattern.findall(text)
+            for match in matches:
+                content = match.strip() if isinstance(match, str) else match[0].strip()
+                if len(content) > len(largest_block) and self._is_valid_code_fast(content):
+                    largest_block = content
+
+        return largest_block if largest_block else None
+
+    def _fast_cleanup(self, response: str) -> str:
+        """Fast cleanup using pre-compiled patterns."""
         cleaned = response
-
-        for pattern in self.compiled_artifacts:
+        for pattern in self._cleanup_patterns:
             cleaned = pattern.sub('', cleaned)
+        return cleaned.strip()
 
-        # Remove leading/trailing whitespace and empty lines
-        lines = cleaned.split('\n')
+    def _is_valid_code_fast(self, code: str) -> bool:
+        """Fast validation using cached results and simple heuristics."""
+        if len(code) < 10:
+            return False
 
-        # Remove empty lines at start and end
+        # Check cache first
+        code_hash = hash(code[:100])  # Hash first 100 chars for cache key
+        if code_hash in self._validation_cache:
+            return self._validation_cache[code_hash]
+
+        # Fast heuristics
+        has_keywords = any(f" {kw} " in code or code.startswith(f"{kw} ")
+                           for kw in self._python_keywords)
+        has_symbols = any(sym in code for sym in ['=', '(', ')', ':', ','])
+        has_structure = '\n' in code and any(line.strip().startswith(('def ', 'class ', 'import '))
+                                             for line in code.split('\n')[:10])
+
+        is_valid = (has_keywords or has_structure) and has_symbols
+
+        # Cache result
+        if len(self._validation_cache) < 100:  # Prevent unbounded growth
+            self._validation_cache[code_hash] = is_valid
+
+        return is_valid
+
+    def _comprehensive_extraction(self, text: str, filename: str, notes: List[str]) -> Tuple[
+        Optional[str], CodeQualityLevel, List[str]]:
+        """Comprehensive extraction for edge cases."""
+        # Try marked sections
+        marked_patterns = [
+            r"(?:Here'?s?\s+(?:the\s+)?(?:complete\s+)?code.*?:\s*\n)(.*?)(?=\n\n|\Z)",
+            r"(?:Implementation:\s*\n)(.*?)(?=\n\n|\Z)",
+            r"(?:Solution:\s*\n)(.*?)(?=\n\n|\Z)"
+        ]
+
+        for pattern in marked_patterns:
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                extracted = match.group(1).strip()
+                if self._is_valid_code_fast(extracted):
+                    quality = self._assess_code_quality(extracted, filename)
+                    notes.append("Marked section extraction")
+                    return extracted, quality, notes
+
+        # Try largest code block
+        extracted = self._extract_largest_code_block(text)
+        if extracted:
+            quality = self._assess_code_quality(extracted, filename)
+            notes.append("Largest block extraction")
+            return extracted, quality, notes
+
+        # Check if entire response is code
+        if self._looks_like_pure_code(text):
+            quality = self._assess_code_quality(text, filename)
+            notes.append("Full response as code")
+            return text.strip(), quality, notes
+
+        return None, CodeQualityLevel.UNUSABLE, notes + ["No valid code found"]
+
+    def _extract_largest_code_block(self, text: str) -> Optional[str]:
+        """Extract largest code-like block with improved heuristics."""
+        lines = text.split('\n')
+        current_block = []
+        largest_block = ""
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Code indicators
+            is_code_line = (
+                    stripped.startswith(('#', 'def ', 'class ', 'import ', 'from ', '@')) or
+                    any(kw in stripped for kw in ['=', 'return', 'if ', 'for ', 'while ']) or
+                    line.startswith(('    ', '\t')) or  # Indented
+                    stripped.endswith((':', ';', '{', '}'))
+            )
+
+            if is_code_line or (not stripped and current_block):  # Include blank lines in code blocks
+                current_block.append(line)
+            else:
+                if len(current_block) > 3:  # Minimum block size
+                    block_content = '\n'.join(current_block).strip()
+                    if len(block_content) > len(largest_block):
+                        largest_block = block_content
+                current_block = []
+
+        # Check final block
+        if len(current_block) > 3:
+            block_content = '\n'.join(current_block).strip()
+            if len(block_content) > len(largest_block):
+                largest_block = block_content
+
+        return largest_block if largest_block else None
+
+    def _looks_like_pure_code(self, text: str) -> bool:
+        """Fast check if text looks like pure code."""
+        lines = [line for line in text.strip().split('\n') if line.strip()]
+        if len(lines) < 2:
+            return False
+
+        code_indicators = 0
+        for line in lines[:10]:  # Check first 10 lines for speed
+            stripped = line.strip()
+            if (stripped.startswith(('#', 'def ', 'class ', 'import ')) or
+                    any(kw in stripped for kw in self._python_keywords) or
+                    line.startswith(('    ', '\t'))):
+                code_indicators += 1
+
+        return code_indicators / min(len(lines), 10) > 0.6
+
+    def _assess_code_quality(self, code: str, filename: str) -> CodeQualityLevel:
+        """Optimized code quality assessment."""
+        if not code.strip():
+            return CodeQualityLevel.UNUSABLE
+
+        try:
+            # Primary syntax check
+            ast.parse(code)
+
+            # Quick quality indicators
+            has_docstrings = '"""' in code or "'''" in code
+            has_type_hints = '->' in code and ':' in code
+            has_imports = any(line.strip().startswith(('import ', 'from '))
+                              for line in code.split('\n')[:5])  # Check first 5 lines only
+            has_definitions = any(line.strip().startswith(('def ', 'class '))
+                                  for line in code.split('\n')[:10])  # Check first 10 lines only
+
+            # Score calculation
+            score = sum([has_docstrings, has_type_hints, has_imports and has_definitions, has_definitions * 0.5])
+
+            if score >= 2.5:
+                return CodeQualityLevel.EXCELLENT
+            elif score >= 1.5:
+                return CodeQualityLevel.GOOD
+            else:
+                return CodeQualityLevel.ACCEPTABLE
+
+        except SyntaxError as e:
+            error_str = str(e).lower()
+            # Quick recovery check
+            if ('unexpected eof' in error_str or
+                    ('invalid syntax' in error_str and len(code.split('\n')) > 5)):
+                return CodeQualityLevel.POOR
+            return CodeQualityLevel.UNUSABLE
+        except Exception:
+            return CodeQualityLevel.POOR
+
+    def clean_and_format_code(self, code: str) -> str:
+        """Fast cleanup and formatting."""
+        if not code:
+            return ""
+
+        lines = code.strip().split('\n')
+
+        # Remove empty lines at start and end only
         while lines and not lines[0].strip():
             lines.pop(0)
         while lines and not lines[-1].strip():
@@ -126,196 +274,23 @@ class CodeOutputProcessor:
 
         return '\n'.join(lines)
 
-    def _try_extraction_strategy(self, text: str, patterns: List[str],
-                                 strategy: CodeExtractionStrategy) -> Optional[str]:
-        """Try a specific extraction strategy with multiple patterns."""
-        for pattern in patterns:
-            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-            if match:
-                extracted = match.group(1).strip()
-                if self._is_valid_code_candidate(extracted):
-                    self.logger.debug(f"Strategy {strategy.name} succeeded with pattern: {pattern[:30]}...")
-                    return extracted
-        return None
-
-    def _extract_largest_code_block(self, text: str) -> Optional[str]:
-        """Extract the largest block that looks like code."""
-        lines = text.split('\n')
-        current_block = []
-        largest_block = []
-
-        for line in lines:
-            stripped = line.strip()
-
-            # Skip obvious non-code lines
-            if self._is_non_code_line(stripped):
-                if len(current_block) > len(largest_block):
-                    largest_block = current_block[:]
-                current_block = []
-                continue
-
-            # Collect potential code lines
-            if self._is_code_like_line(stripped) or (stripped and len(current_block) > 0):
-                current_block.append(line)
-            elif stripped:  # Non-empty line that might be code
-                current_block.append(line)
-
-        # Check the last block
-        if len(current_block) > len(largest_block):
-            largest_block = current_block[:]
-
-        if largest_block and len(largest_block) >= 3:  # Minimum viable code block
-            return '\n'.join(largest_block).strip()
-
-        return None
-
-    def _is_non_code_line(self, line: str) -> bool:
-        """Check if a line is clearly not code."""
-        if not line:
-            return False
-
-        non_code_indicators = [
-            line.startswith(('Here', 'The ', 'This ', 'I ', 'Let ', 'Note:', 'Please')),
-            '```' in line,
-            line.endswith('?'),
-            line.lower().startswith(('explanation:', 'usage:', 'example:')),
-            re.match(r'^[A-Z][a-z\s]+[.!]$', line)  # Sentence-like
-        ]
-
-        return any(non_code_indicators)
-
-    def _is_code_like_line(self, line: str) -> bool:
-        """Check if a line looks like code."""
-        if not line:
-            return False
-
-        code_indicators = [
-            line.startswith(('#', 'def ', 'class ', 'import ', 'from ', '@')),
-            any(keyword in line for keyword in
-                ['=', 'return', 'if ', 'else:', 'elif ', 'for ', 'while ', 'try:', 'except']),
-            line.startswith(('    ', '\t')),  # Indented
-        ]
-
-        return any(code_indicators)
-
-    def _is_valid_code_candidate(self, code: str) -> bool:
-        """Quick validation that extracted text could be code."""
-        if not code or len(code.strip()) < 10:
-            return False
-
-        # Must have some Python-like characteristics
-        python_indicators = [
-            'def ', 'class ', 'import ', 'from ', '=', 'return',
-            'if ', 'else:', 'try:', 'except', '#'
-        ]
-
-        indicator_count = sum(1 for indicator in python_indicators if indicator in code)
-        return indicator_count >= 2
-
-    def _looks_like_pure_code(self, text: str) -> bool:
-        """Check if entire text looks like pure code without explanations."""
-        lines = text.strip().split('\n')
-        if len(lines) < 3:
-            return False
-
-        code_lines = sum(1 for line in lines if self._is_code_like_line(line.strip()))
-        non_code_lines = sum(1 for line in lines if self._is_non_code_line(line.strip()))
-
-        # Should be mostly code lines
-        return code_lines > max(3, len(lines) * 0.7) and non_code_lines < len(lines) * 0.2
-
-    def _assess_code_quality(self, code: str, filename: str) -> CodeQualityLevel:
-        """Assess the quality of extracted code."""
-        try:
-            # Try to parse with AST
-            ast.parse(code)
-
-            # Additional quality checks
-            lines = code.split('\n')
-
-            # Check for good practices
-            has_docstrings = '"""' in code or "'''" in code
-            has_type_hints = ':' in code and '->' in code
-            has_proper_imports = any(line.strip().startswith(('import ', 'from ')) for line in lines)
-            has_functions_or_classes = any(line.strip().startswith(('def ', 'class ')) for line in lines)
-
-            quality_score = 0
-            if has_docstrings: quality_score += 1
-            if has_type_hints: quality_score += 1
-            if has_proper_imports: quality_score += 1
-            if has_functions_or_classes: quality_score += 1
-
-            if quality_score >= 3:
-                return CodeQualityLevel.EXCELLENT
-            elif quality_score >= 2:
-                return CodeQualityLevel.GOOD
-            else:
-                return CodeQualityLevel.ACCEPTABLE
-
-        except SyntaxError as e:
-            # Check if it's recoverable
-            if self._is_recoverable_syntax_error(code, str(e)):
-                return CodeQualityLevel.POOR
-            else:
-                return CodeQualityLevel.UNUSABLE
-        except Exception:
-            return CodeQualityLevel.POOR
-
-    def _is_recoverable_syntax_error(self, code: str, error: str) -> bool:
-        """Check if syntax error might be recoverable."""
-        # Common recoverable issues
-        recoverable_indicators = [
-            'unexpected EOF' in error.lower(),
-            'invalid syntax' in error.lower() and len(code.split('\n')) > 5,
-            'indentation' in error.lower()
-        ]
-
-        return any(recoverable_indicators)
-
-    def clean_and_format_code(self, code: str) -> str:
-        """Final cleanup and formatting of extracted code."""
-        if not code:
-            return code
-
-        lines = code.split('\n')
-
-        # Remove excessive blank lines
-        cleaned_lines = []
-        prev_blank = False
-
-        for line in lines:
-            is_blank = not line.strip()
-            if is_blank and prev_blank:
-                continue  # Skip consecutive blank lines
-            cleaned_lines.append(line)
-            prev_blank = is_blank
-
-        # Remove trailing blank lines
-        while cleaned_lines and not cleaned_lines[-1].strip():
-            cleaned_lines.pop()
-
-        return '\n'.join(cleaned_lines)
-
-    def suggest_fixes_for_poor_code(self, code: str, filename: str) -> List[str]:
-        """Suggest potential fixes for poor quality code."""
+    def suggest_fixes_for_poor_code(self, raw_response_text: str, filename: str) -> List[str]:
+        """Quick suggestions for common issues."""
         suggestions = []
 
+        if "```" not in raw_response_text:
+            suggestions.append("LLM response missing code fences (```)")
+
+        if len(raw_response_text.strip()) < 50:
+            suggestions.append("Response too short to contain meaningful code")
+
         try:
-            ast.parse(code)
-        except SyntaxError as e:
-            error_msg = str(e)
-            if 'unexpected EOF' in error_msg:
-                suggestions.append("Code appears incomplete - may need additional lines")
-            elif 'invalid syntax' in error_msg:
-                suggestions.append(f"Syntax error at line {e.lineno}: {error_msg}")
-            elif 'indentation' in error_msg:
-                suggestions.append("Indentation issues detected - check whitespace consistency")
+            ast.parse(raw_response_text.strip())
+            suggestions.append("Raw response might be valid Python - check extraction logic")
+        except SyntaxError:
+            suggestions.append("LLM output contains syntax errors")
 
-        # Check for common issues
-        if not any(line.strip().startswith(('import ', 'from ')) for line in code.split('\n')):
-            suggestions.append("Missing import statements")
-
-        if 'def ' not in code and 'class ' not in code:
-            suggestions.append("No functions or classes found - might be incomplete")
+        if not suggestions:
+            suggestions.append("General extraction failure - review LLM output format")
 
         return suggestions
