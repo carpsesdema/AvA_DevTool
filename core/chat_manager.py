@@ -5,7 +5,7 @@ import os
 import uuid
 import re
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
-
+from core.code_output_processor import CodeOutputProcessor, CodeQualityLevel
 from PySide6.QtCore import QObject, Slot
 
 # Move the TYPE_CHECKING imports to avoid circular imports
@@ -41,14 +41,14 @@ class ChatManager(QObject):
         logger.info("ChatManager initializing...")
 
         self._orchestrator = orchestrator
-
         self._event_bus = self._orchestrator.get_event_bus()
         self._backend_coordinator = self._orchestrator.get_backend_coordinator()
         self._llm_comm_logger = self._orchestrator.get_llm_communication_logger()
         self._project_manager = self._orchestrator.get_project_manager()
-
+        self._code_processor = CodeOutputProcessor()
         self._upload_service = self._orchestrator.get_upload_service()
         self._rag_handler = self._orchestrator.get_rag_handler()
+
 
         if not isinstance(self._project_manager, ProjectManager):
             logger.critical("ChatManager received an invalid ProjectManager instance.")
@@ -440,19 +440,45 @@ class ChatManager(QObject):
                                                                                   "filename": filename})
 
     def _handle_plan_then_code_request(self, user_msg_txt: str):
+        """Enhanced plan-then-code request handling with better error recovery."""
         if not self._is_chat_backend_configured or not self._is_specialized_backend_configured:
-            self._emit_status_update("Planner or Code LLM not configured.", "#e06c75", True, 5000)
+            self._emit_status_update("Both Chat and Specialized LLMs must be configured for autonomous coding.",
+                                     "#e06c75", True, 5000)
             return
+
         current_project_dir = self._get_current_project_directory()
         task_type = self._detect_task_type(user_msg_txt, "multi_file_project")
-        self._plan_and_code_coordinator.start_planning_sequence(
-            user_query=user_msg_txt, planner_llm_backend_id=self._active_chat_backend_id,
-            planner_llm_model_name=self._active_chat_model_name, planner_llm_temperature=self._active_temperature,
-            specialized_llm_backend_id=self._active_specialized_backend_id,
-            specialized_llm_model_name=self._active_specialized_model_name,
-            project_files_dir=current_project_dir, project_id=self._current_project_id,
-            session_id=self._current_session_id, user_task_type=task_type
-        )
+
+        # Log the attempt
+        self._log_llm_comm("AUTONOMOUS_CODING_REQUEST", f"Starting autonomous coding for: {user_msg_txt[:100]}...")
+
+        # Check if coordinator is busy
+        if hasattr(self._plan_and_code_coordinator, 'is_busy') and self._plan_and_code_coordinator.is_busy():
+            self._emit_status_update("Autonomous coding already in progress. Please wait.", "#e5c07b", True, 3000)
+            return
+
+        # Use the streamlined coordinator
+        try:
+            success = self._plan_and_code_coordinator.start_autonomous_coding(
+                user_query=user_msg_txt,
+                planner_backend=self._active_chat_backend_id,
+                planner_model=self._active_chat_model_name,
+                coder_backend=self._active_specialized_backend_id,
+                coder_model=self._active_specialized_model_name,
+                project_dir=current_project_dir,
+                project_id=self._current_project_id,
+                session_id=self._current_session_id,
+                task_type=task_type
+            )
+
+            if not success:
+                self._emit_status_update("Failed to start autonomous coding sequence", "#e06c75", True, 3000)
+                self._log_llm_comm("AUTONOMOUS_CODING_ERROR", "Failed to start sequence")
+
+        except Exception as e:
+            logger.error(f"Error starting autonomous coding: {e}", exc_info=True)
+            self._emit_status_update(f"Autonomous coding error: {str(e)}", "#e06c75", True, 5000)
+            self._log_llm_comm("AUTONOMOUS_CODING_EXCEPTION", f"Exception: {e}")
 
     def _get_current_project_directory(self) -> str:
         import os
@@ -475,13 +501,60 @@ class ChatManager(QObject):
         logger.info(f"CM: Using project directory: {project_output_dir}")
         return project_output_dir
 
-    def _extract_code_from_response(self, response_text: str) -> Optional[str]:
-        python_pattern = r"```python\s*\n(.*?)```"
-        match = re.search(python_pattern, response_text, re.DOTALL | re.IGNORECASE)
-        if match: return match.group(1).strip()
-        generic_pattern = r"```.*?\n(.*?)```"
-        match = re.search(generic_pattern, response_text, re.DOTALL)
-        if match: return match.group(1).strip()
+    def _extract_code_from_response(self, response_text: str, filename: str = "generated_file.py") -> Optional[str]:
+        """Enhanced code extraction using the specialized processor."""
+        if not response_text or not response_text.strip():
+            logger.warning("Empty response text for code extraction")
+            return None
+
+        try:
+            # Use the enhanced code processor
+            extracted_code, quality, processing_notes = self._code_processor.process_llm_response(
+                response_text, filename, "python"
+            )
+
+            # Log the extraction results
+            self._log_llm_comm("CODE_EXTRACTION",
+                               f"File: {filename}, Quality: {quality.name if quality else 'None'}, "
+                               f"Notes: {', '.join(processing_notes)}")
+
+            if extracted_code:
+                if quality in [CodeQualityLevel.EXCELLENT, CodeQualityLevel.GOOD, CodeQualityLevel.ACCEPTABLE]:
+                    logger.info(f"Successfully extracted code for {filename} (Quality: {quality.name})")
+                    return extracted_code
+                elif quality == CodeQualityLevel.POOR:
+                    logger.warning(f"Poor quality code extracted for {filename}: {', '.join(processing_notes)}")
+                    # Still return it but with warnings
+                    return extracted_code
+                else:
+                    logger.error(f"Unusable code extracted for {filename}: {', '.join(processing_notes)}")
+                    return None
+            else:
+                logger.warning(f"No code could be extracted for {filename}: {', '.join(processing_notes)}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error in enhanced code extraction for {filename}: {e}", exc_info=True)
+            self._log_llm_comm("CODE_EXTRACTION_ERROR", f"Error: {e}")
+
+            # Fallback to basic extraction
+            return self._basic_code_extraction_fallback(response_text)
+
+    def _basic_code_extraction_fallback(self, response_text: str) -> Optional[str]:
+        """Fallback code extraction if the enhanced processor fails."""
+        import re
+
+        # Try the most basic pattern matching as fallback
+        patterns = [
+            r"```python\s*\n(.*?)```",
+            r"```\s*\n(.*?)```",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+
         return None
 
     @Slot()
@@ -568,39 +641,90 @@ class ChatManager(QObject):
 
     @Slot(str, object, dict)
     def _handle_llm_response_completed(self, request_id: str, completed_message_obj: object, usage_stats_dict: dict):
+        """Enhanced LLM response handling with better error recovery."""
         meta_pid = usage_stats_dict.get("project_id")
         meta_sid = usage_stats_dict.get("session_id")
         purpose = usage_stats_dict.get("purpose")
+
         if request_id == self._current_llm_request_id and meta_pid == self._current_project_id and meta_sid == self._current_session_id:
             self._event_bus.hideLoader.emit()
+
             if isinstance(completed_message_obj, ChatMessage):
                 self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE", completed_message_obj.text)
-                if purpose == "file_creation" and request_id in self._file_creation_request_ids:
+
+                # Handle enhanced file creation
+                if purpose in ["file_creation",
+                               "enhanced_file_creation"] and request_id in self._file_creation_request_ids:
                     filename = self._file_creation_request_ids.pop(request_id)
-                    extracted_code = self._extract_code_from_response(completed_message_obj.text)
+
+                    # Use enhanced code extraction
+                    extracted_code = self._extract_code_from_response(completed_message_obj.text, filename)
+
                     if extracted_code:
-                        logger.info(f"CM: Extracted code for file '{filename}', sending to code viewer")
-                        self._event_bus.modificationFileReadyForDisplay.emit(filename, extracted_code)
-                        file_creation_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE,
-                                                        parts=[f"[File created: {filename} - View in Code Viewer]"],
-                                                        metadata={"is_file_creation": True, "filename": filename})
+                        logger.info(f"CM: Successfully extracted code for file '{filename}', sending to code viewer")
+
+                        # Clean and format the code before displaying
+                        clean_code = self._code_processor.clean_and_format_code(extracted_code)
+                        self._event_bus.modificationFileReadyForDisplay.emit(filename, clean_code)
+
+                        # Create success message
+                        file_creation_msg = ChatMessage(
+                            id=uuid.uuid4().hex,
+                            role=SYSTEM_ROLE,
+                            parts=[f"[File created: {filename} - View in Code Viewer ✅]"],
+                            metadata={"is_file_creation": True, "filename": filename}
+                        )
                         self._current_chat_history.append(file_creation_msg)
-                        self._event_bus.newMessageAddedToHistory.emit(self._current_project_id,
-                                                                      self._current_session_id, file_creation_msg)
+                        self._event_bus.newMessageAddedToHistory.emit(
+                            self._current_project_id, self._current_session_id, file_creation_msg)
                     else:
                         logger.warning(f"CM: Could not extract code from response for file '{filename}'")
-                updated = False
-                for i, msg in enumerate(self._current_chat_history):
-                    if msg.id == request_id:
-                        self._current_chat_history[i] = completed_message_obj
-                        self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
-                        updated = True;
-                        break
-                if not updated: self._current_chat_history.append(completed_message_obj)
+
+                        # Try to get suggestions for improvement
+                        try:
+                            suggestions = self._code_processor.suggest_fixes_for_poor_code(
+                                completed_message_obj.text, filename
+                            )
+                            suggestion_text = f"Code extraction failed for {filename}. Suggestions: {'; '.join(suggestions)}"
+                        except:
+                            suggestion_text = f"Could not extract code for {filename}. Raw response may contain issues."
+
+                        error_msg = ChatMessage(
+                            id=uuid.uuid4().hex,
+                            role=ERROR_ROLE,
+                            parts=[f"[{suggestion_text}]"],
+                            metadata={"is_extraction_error": True, "filename": filename}
+                        )
+                        self._current_chat_history.append(error_msg)
+                        self._event_bus.newMessageAddedToHistory.emit(
+                            self._current_project_id, self._current_session_id, error_msg)
+
+                # Handle regular responses (non-file creation)
+                else:
+                    # Update the message in history
+                    updated = False
+                    for i, msg in enumerate(self._current_chat_history):
+                        if msg.id == request_id:
+                            self._current_chat_history[i] = completed_message_obj
+                            self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
+                            updated = True
+                            break
+
+                    if not updated:
+                        self._current_chat_history.append(completed_message_obj)
+
+                # Emit finalization signal
                 if self._current_project_id and self._current_session_id:
-                    self._event_bus.messageFinalizedForSession.emit(self._current_project_id, self._current_session_id,
-                                                                    request_id, completed_message_obj, usage_stats_dict,
-                                                                    False)
+                    self._event_bus.messageFinalizedForSession.emit(
+                        self._current_project_id,
+                        self._current_session_id,
+                        request_id,
+                        completed_message_obj,
+                        usage_stats_dict,
+                        False  # is_error = False
+                    )
+
+            # Clean up and update UI
             self._current_llm_request_id = None
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
             self._emit_status_update(f"Ready. Last: {self._active_chat_model_name}", "#98c379")

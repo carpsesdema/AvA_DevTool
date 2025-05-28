@@ -1,4 +1,4 @@
-# backends/ollama_adapter.py
+# backends/ollama_adapter.py - Enhanced with timeout handling
 import asyncio
 import base64
 import logging
@@ -43,6 +43,11 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class OllamaStreamTimeoutError(Exception):
+    """Custom exception for Ollama streaming timeouts."""
+    pass
+
+
 class OllamaAdapter(BackendInterface):
     DEFAULT_OLLAMA_HOST = "http://localhost:11434"
     DEFAULT_MODEL = "qwen2.5-coder:14b"
@@ -57,7 +62,7 @@ class OllamaAdapter(BackendInterface):
         self._ollama_host: str = self.DEFAULT_OLLAMA_HOST
         self._last_prompt_tokens: Optional[int] = None
         self._last_completion_tokens: Optional[int] = None
-        logger.info("OllamaAdapter initialized.")
+        logger.info("Enhanced OllamaAdapter initialized with timeout handling.")
 
     def configure(self, api_key: Optional[str], model_name: Optional[str], system_prompt: Optional[str] = None) -> bool:
         effective_model_name = model_name if model_name and model_name.strip() else self.DEFAULT_MODEL
@@ -65,7 +70,7 @@ class OllamaAdapter(BackendInterface):
             f"OllamaAdapter: Configuring. Host: {self._ollama_host}, Effective Model: {effective_model_name}. System Prompt: {'Yes' if system_prompt else 'No'}")
 
         self._sync_client = None
-        self._is_configured = False  # Default to false, set true after successful param setup
+        self._is_configured = False
         self._last_error = None
         self._last_prompt_tokens = None
         self._last_completion_tokens = None
@@ -80,204 +85,279 @@ class OllamaAdapter(BackendInterface):
                                                                   str) and system_prompt.strip() else None
 
         try:
-            logger.info(f"  Attempting to create Ollama client for host: {self._ollama_host} with timeout 20s.")
-            self._sync_client = ollama.Client(host=self._ollama_host, timeout=20.0)
-            # Parameters are set, so basic configuration is complete.
+            logger.info(f"Creating Ollama client with enhanced timeout settings...")
+            # ENHANCED: Set longer timeout for initial connection and operations
+            self._sync_client = ollama.Client(
+                host=self._ollama_host,
+                timeout=60.0  # Increased from default 30s to 60s
+            )
+
             self._is_configured = True
-            logger.info(f"  OllamaAdapter parameters configured for model '{self._model_name}' at {self._ollama_host}.")
+            logger.info(f"OllamaAdapter parameters configured for model '{self._model_name}' at {self._ollama_host}.")
 
-            # Now, test the connection. Failure here is a warning, not a config failure.
-            logger.info(f"  Testing connection to Ollama server with .list() call...")
+            # Test connection with timeout protection
+            logger.info(f"Testing connection to Ollama server...")
             try:
-                self._sync_client.list()  # Test connection
-                logger.info(f"  Successfully connected to Ollama and listed models at {self._ollama_host}.")
-            except ollama.RequestError as conn_err_req:
-                self._last_error = f"Warning: Failed to connect/list models from Ollama at {self._ollama_host} during initial configure. Is server running? (RequestError): {conn_err_req}"
-                logger.warning(self._last_error, exc_info=False)
-                # Keep _is_configured = True, as parameters are set. Error will be caught later.
-            except ConnectionRefusedError:
-                self._last_error = f"Warning: Connection refused by Ollama at {self._ollama_host} during initial configure. Is server running?"
-                logger.warning(self._last_error, exc_info=False)
-            except Exception as conn_err_other:
-                self._last_error = f"Warning: Unexpected error during Ollama connection test at {self._ollama_host}: {type(conn_err_other).__name__} - {conn_err_other}"
-                logger.warning(self._last_error, exc_info=True)
-
-            return True  # Configuration of parameters was successful
-
-        except Exception as e:
-            self._last_error = f"Unexpected error creating Ollama client for host '{self._ollama_host}': {type(e).__name__} - {e}"
-            logger.error(self._last_error, exc_info=True)
-            self._sync_client = None
-            self._is_configured = False  # Critical client creation error means not configured
-            return False
-
-    def is_configured(self) -> bool:
-        return self._is_configured  # Now primarily reflects if parameters are set
-
-    def get_last_error(self) -> Optional[str]:
-        return self._last_error
-
-    async def get_response_stream(self, history: List[ChatMessage], options: Optional[Dict[str, Any]] = None) -> \
-            AsyncGenerator[str, None]:
-        logger.info(
-            f"OllamaAdapter: Generating stream. Model: {self._model_name}, History items: {len(history)}, Options: {options}")
-        self._last_error = None  # Clear previous errors for this attempt
-        self._last_prompt_tokens = None
-        self._last_completion_tokens = None
-
-        if not self.is_configured() or not self._sync_client:
-            self._last_error = "Adapter is not configured or client is missing (cannot make LLM call)."
-            logger.error(self._last_error)
-            raise RuntimeError(self._last_error)
-
-        messages_for_api = self._format_history_for_api(history)
-        if not messages_for_api and not self._system_prompt:
-            if not messages_for_api and self._system_prompt and not any(
-                    m['role'] == 'system' for m in messages_for_api):
-                logger.debug("OllamaAdapter: History is empty, but a system prompt is configured. This is valid.")
-            else:
-                self._last_error = "Cannot send request: No valid messages in history for API format and no system prompt."
-                logger.error(self._last_error)
-                raise ValueError(self._last_error)
-
-        logger.debug(f"  Sending {len(messages_for_api)} formatted messages to model '{self._model_name}'.")
-
-        ollama_api_options: Dict[str, Any] = {}
-        if options:
-            if "temperature" in options and isinstance(options["temperature"], (float, int)):
-                ollama_api_options["temperature"] = float(options["temperature"])
-                logger.info(f"  Applying temperature: {ollama_api_options['temperature']} to Ollama request.")
-
-        ollama_sync_iterator = None
-        try:
-            def _get_ollama_iterator():
-                # This is where a connection error would manifest if the server is down now
-                return self._sync_client.chat(  # type: ignore
-                    model=self._model_name,
-                    messages=messages_for_api,
-                    stream=True,
-                    options=ollama_api_options
-                )
-
-            ollama_sync_iterator = await asyncio.to_thread(_get_ollama_iterator)
-            loop = asyncio.get_running_loop()
-            chunk_count = 0
-
-            while True:
-                chunk_data_obj: Optional[_OllamaChatResponseType] = None
-                try:
-                    chunk_data_obj = await loop.run_in_executor(None, next, ollama_sync_iterator)
-                    chunk_count += 1
-                except StopIteration:
-                    logger.info(
-                        f"Ollama stream for '{self._model_name}' ended (StopIteration). Total Chunks: {chunk_count}.")
-                    break
-                except Exception as e_next:
-                    self._last_error = f"Error calling next() on Ollama stream for '{self._model_name}': {type(e_next).__name__} - {e_next}"
-                    logger.error(self._last_error, exc_info=True)
-                    yield f"[SYSTEM ERROR: {self._last_error}]"
-                    return
-
-                logger.debug(
-                    f"Ollama raw chunk obj #{chunk_count} for {self._model_name}: Type {type(chunk_data_obj)}, Content: {str(chunk_data_obj)[:250]}")
-
-                chunk_error = getattr(chunk_data_obj, 'error', None)
-                if not chunk_error and hasattr(chunk_data_obj, 'message') and chunk_data_obj.message:  # type: ignore
-                    chunk_error = getattr(chunk_data_obj.message, 'error', None)  # type: ignore
-
-                if chunk_error:
-                    self._last_error = f"Ollama Stream Error: {chunk_error}"
-                    logger.error(self._last_error)
-                    yield f"[SYSTEM ERROR: {self._last_error}]"
-                    if getattr(chunk_data_obj, 'done', False):
-                        self._last_prompt_tokens = getattr(chunk_data_obj, 'prompt_eval_count', None)
-                        self._last_completion_tokens = getattr(chunk_data_obj, 'eval_count', None)
-                    return
-
-                content_part = ''
-                if hasattr(chunk_data_obj, 'message') and chunk_data_obj.message:  # type: ignore
-                    if hasattr(chunk_data_obj.message, 'content') and chunk_data_obj.message.content:  # type: ignore
-                        content_part = chunk_data_obj.message.content  # type: ignore
-
-                if content_part:
-                    yield content_part
-
-                is_done = getattr(chunk_data_obj, 'done', False)
-                if is_done:
-                    logger.info(f"Ollama stream for '{self._model_name}' finished (done flag). Chunks: {chunk_count}.")
-                    self._last_prompt_tokens = getattr(chunk_data_obj, 'prompt_eval_count', None)
-                    self._last_completion_tokens = getattr(chunk_data_obj, 'eval_count', None)
-                    logger.info(
-                        f"  Ollama Token Usage ('{self._model_name}'): Prompt={self._last_prompt_tokens}, Completion={self._last_completion_tokens}")
-                    break
-        except ollama.ResponseError as e_resp:  # type: ignore
-            self._last_error = f"Ollama API Response Error: {e_resp.status_code} - {e_resp.error}"
-            logger.error(self._last_error, exc_info=True)
-            raise RuntimeError(self._last_error) from e_resp
-        except ollama.RequestError as e_req:  # type: ignore
-            self._last_error = f"Ollama API Request Error (e.g. server down): {e_req}"
-            logger.error(self._last_error, exc_info=True)  # Don't print full trace for common conn errors
-            raise RuntimeError(self._last_error) from e_req
-        except Exception as e_general:
-            if not self._last_error:
-                self._last_error = f"Unexpected error in Ollama stream ('{self._model_name}'): {type(e_general).__name__} - {e_general}"
-            logger.error(self._last_error, exc_info=True)
-            if not isinstance(e_general, RuntimeError):
-                raise RuntimeError(self._last_error) from e_general
-            else:
-                raise
-
-    def get_available_models(self) -> List[str]:
-        """Get available models with increased timeout and better error handling"""
-        self._last_error = None
-        if not API_LIBRARY_AVAILABLE:
-            self._last_error = "Ollama library not installed."
-            logger.error(self._last_error)
-            return []
-
-        model_names: List[str] = []
-        client_to_use: Optional[ollama.Client] = self._sync_client
-
-        # Create or get client
-        if not client_to_use:
-            try:
-                client_to_use = ollama.Client(host=self._ollama_host, timeout=30.0)  # Increased timeout
-                logger.info(f"Created temporary Ollama client for model fetching: {self._ollama_host}")
-            except Exception as e_temp_client:
-                self._last_error = f"Failed to create Ollama client: {type(e_temp_client).__name__}"
-                logger.error(self._last_error)
-                # Return defaults if can't connect
-                return self._get_default_model_list()
-
-        # Test connection first
-        try:
-            # Quick ping test using requests
-            response = requests.get(f"{self._ollama_host}/api/tags", timeout=10)
-            if response.status_code != 200:
-                logger.warning(f"Ollama API returned status {response.status_code}")
-                return self._get_default_model_list()
-
-            # Parse response directly
-            data = response.json()
-            if 'models' in data:
-                for model_item in data['models']:
-                    if isinstance(model_item, dict) and 'name' in model_item:
-                        model_names.append(model_item['name'])
-                logger.info(f"Successfully fetched {len(model_names)} models from Ollama API")
-
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Direct API call failed: {e}, trying ollama library...")
-
-            # Fallback to ollama library with threading and longer timeout
-            try:
+                # Use a timeout for the connection test
                 import threading
                 import queue
                 result_queue = queue.Queue()
                 exception_queue = queue.Queue()
 
+                def test_connection():
+                    try:
+                        models = self._sync_client.list()
+                        result_queue.put(models)
+                    except Exception as e:
+                        exception_queue.put(e)
+
+                test_thread = threading.Thread(target=test_connection)
+                test_thread.daemon = True
+                test_thread.start()
+                test_thread.join(timeout=10.0)  # 10 second timeout for connection test
+
+                if test_thread.is_alive():
+                    self._last_error = f"Warning: Connection test timed out after 10s. Server might be slow but configured."
+                    logger.warning(self._last_error)
+                elif not exception_queue.empty():
+                    e = exception_queue.get()
+                    self._last_error = f"Warning: Connection test failed: {e}. Will retry during actual requests."
+                    logger.warning(self._last_error)
+                else:
+                    logger.info(f"Successfully connected to Ollama and listed models at {self._ollama_host}.")
+
+            except Exception as conn_err:
+                self._last_error = f"Warning: Connection test error: {conn_err}. Will retry during requests."
+                logger.warning(self._last_error)
+
+            return True
+
+        except Exception as e:
+            self._last_error = f"Failed to create Ollama client: {type(e).__name__} - {e}"
+            logger.error(self._last_error, exc_info=True)
+            self._sync_client = None
+            self._is_configured = False
+            return False
+
+    def is_configured(self) -> bool:
+        return self._is_configured
+
+    def get_last_error(self) -> Optional[str]:
+        return self._last_error
+
+    async def get_response_stream(self, history: List[ChatMessage], options: Optional[Dict[str, Any]] = None) -> \
+    AsyncGenerator[str, None]:
+        logger.info(
+            f"OllamaAdapter: Generating stream with enhanced timeout handling. Model: {self._model_name}, History items: {len(history)}")
+        self._last_error = None
+        self._last_prompt_tokens = None
+        self._last_completion_tokens = None
+
+        if not self.is_configured() or not self._sync_client:
+            self._last_error = "Adapter not configured or client missing."
+            logger.error(self._last_error)
+            raise RuntimeError(self._last_error)
+
+        messages_for_api = self._format_history_for_api(history)
+        if not messages_for_api and not self._system_prompt:
+            self._last_error = "No valid messages and no system prompt."
+            logger.error(self._last_error)
+            raise ValueError(self._last_error)
+
+        logger.debug(f"Sending {len(messages_for_api)} formatted messages to model '{self._model_name}'.")
+
+        ollama_api_options: Dict[str, Any] = {}
+        if options:
+            if "temperature" in options and isinstance(options["temperature"], (float, int)):
+                ollama_api_options["temperature"] = float(options["temperature"])
+
+        # ENHANCED: Use the robust streaming with timeout handling
+        try:
+            async for chunk in self._stream_with_enhanced_timeout(messages_for_api, ollama_api_options):
+                yield chunk
+        except Exception as e:
+            error_msg = f"Enhanced streaming error: {type(e).__name__} - {e}"
+            self._last_error = error_msg
+            logger.error(error_msg, exc_info=True)
+            yield f"[SYSTEM ERROR: {error_msg}]"
+
+    async def _stream_with_enhanced_timeout(self, messages: List[Dict[str, Any]], options: Dict[str, Any]) -> \
+    AsyncGenerator[str, None]:
+        """Enhanced streaming with proper timeout and retry handling."""
+
+        max_retries = 2
+        chunk_timeout = 25.0  # Timeout for individual chunks
+        total_timeout = 180.0  # Total timeout for entire request
+        retry_delay = 3.0
+
+        for attempt in range(max_retries + 1):
+            try:
+                logger.info(f"Starting Ollama stream attempt {attempt + 1}/{max_retries + 1}")
+
+                start_time = asyncio.get_event_loop().time()
+                last_chunk_time = start_time
+                chunk_count = 0
+
+                # Create the stream with timeout protection
+                stream_creation_task = asyncio.create_task(
+                    self._create_ollama_stream(messages, options)
+                )
+
+                try:
+                    # Wait for stream creation with timeout
+                    ollama_sync_iterator = await asyncio.wait_for(stream_creation_task, timeout=15.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Stream creation timed out on attempt {attempt + 1}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    raise OllamaStreamTimeoutError("Failed to create stream after all retries")
+
+                # Process the stream with chunk-level timeouts
+                loop = asyncio.get_running_loop()
+
+                while True:
+                    current_time = loop.time()
+
+                    # Check total timeout
+                    if current_time - start_time > total_timeout:
+                        raise OllamaStreamTimeoutError(f"Total streaming time exceeded {total_timeout}s")
+
+                    # Check chunk timeout
+                    if current_time - last_chunk_time > chunk_timeout:
+                        raise OllamaStreamTimeoutError(f"No chunk received in {chunk_timeout}s")
+
+                    try:
+                        # Get next chunk with timeout
+                        chunk_task = asyncio.create_task(
+                            loop.run_in_executor(None, self._get_next_chunk, ollama_sync_iterator)
+                        )
+                        chunk_data_obj = await asyncio.wait_for(chunk_task, timeout=chunk_timeout)
+
+                        if chunk_data_obj is None:  # Stream ended normally
+                            logger.info(f"Ollama stream ended normally after {chunk_count} chunks")
+                            return
+
+                        # Process the chunk
+                        chunk_error = getattr(chunk_data_obj, 'error', None)
+                        if chunk_error:
+                            error_msg = f"Ollama chunk error: {chunk_error}"
+                            self._last_error = error_msg
+                            logger.error(error_msg)
+                            yield f"[SYSTEM ERROR: {error_msg}]"
+                            return
+
+                        # Extract content
+                        content_part = ''
+                        if hasattr(chunk_data_obj, 'message') and chunk_data_obj.message:
+                            if hasattr(chunk_data_obj.message, 'content') and chunk_data_obj.message.content:
+                                content_part = chunk_data_obj.message.content
+
+                        if content_part:
+                            yield content_part
+                            chunk_count += 1
+                            last_chunk_time = current_time
+
+                        # Check if done
+                        is_done = getattr(chunk_data_obj, 'done', False)
+                        if is_done:
+                            logger.info(f"Ollama stream completed successfully. Chunks: {chunk_count}")
+                            # Extract token usage
+                            self._last_prompt_tokens = getattr(chunk_data_obj, 'prompt_eval_count', None)
+                            self._last_completion_tokens = getattr(chunk_data_obj, 'eval_count', None)
+                            return
+
+                        # Brief pause to prevent tight loop
+                        await asyncio.sleep(0.01)
+
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Chunk timeout after {chunk_count} chunks on attempt {attempt + 1}")
+                        if attempt < max_retries:
+                            break  # Try next attempt
+                        raise OllamaStreamTimeoutError(f"Chunk timeout after {max_retries + 1} attempts")
+
+                # If we got here, this attempt succeeded
+                return
+
+            except (OllamaStreamTimeoutError, asyncio.TimeoutError) as timeout_error:
+                logger.warning(f"Timeout on attempt {attempt + 1}: {timeout_error}")
+                if attempt < max_retries:
+                    logger.info(f"Retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 1.5  # Exponential backoff
+                else:
+                    raise OllamaStreamTimeoutError(f"All retry attempts failed: {timeout_error}")
+
+            except Exception as e:
+                logger.error(f"Non-timeout error on attempt {attempt + 1}: {e}", exc_info=True)
+                raise
+
+    async def _create_ollama_stream(self, messages: List[Dict[str, Any]], options: Dict[str, Any]):
+        """Create the Ollama stream iterator with timeout protection."""
+        loop = asyncio.get_running_loop()
+
+        def _sync_create_stream():
+            return self._sync_client.chat(
+                model=self._model_name,
+                messages=messages,
+                stream=True,
+                options=options
+            )
+
+        try:
+            return await loop.run_in_executor(None, _sync_create_stream)
+        except Exception as e:
+            logger.error(f"Failed to create Ollama stream: {e}")
+            raise
+
+    def _get_next_chunk(self, stream_iterator):
+        """Get the next chunk from stream iterator (synchronous)."""
+        try:
+            return next(stream_iterator)
+        except StopIteration:
+            return None
+        except Exception as e:
+            logger.error(f"Error getting next chunk: {e}")
+            raise
+
+    def get_available_models(self) -> List[str]:
+        """Get available models with enhanced timeout protection."""
+        self._last_error = None
+        if not API_LIBRARY_AVAILABLE:
+            self._last_error = "Ollama library not installed."
+            return self._get_default_model_list()
+
+        model_names: List[str] = []
+
+        # Use multiple approaches for robustness
+        success = False
+
+        # Approach 1: Direct API call
+        try:
+            response = requests.get(f"{self._ollama_host}/api/tags", timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                if 'models' in data:
+                    for model_item in data['models']:
+                        if isinstance(model_item, dict) and 'name' in model_item:
+                            model_names.append(model_item['name'])
+                    success = True
+                    logger.info(f"Successfully fetched {len(model_names)} models via direct API")
+        except Exception as e:
+            logger.warning(f"Direct API approach failed: {e}")
+
+        # Approach 2: Ollama library with timeout (fallback)
+        if not success and self._sync_client:
+            try:
+                import threading
+                import queue
+
+                result_queue = queue.Queue()
+                exception_queue = queue.Queue()
+
                 def fetch_models_thread():
                     try:
-                        models_response = client_to_use.list()
+                        models_response = self._sync_client.list()
                         result_queue.put(models_response)
                     except Exception as e_thread:
                         exception_queue.put(e_thread)
@@ -285,17 +365,16 @@ class OllamaAdapter(BackendInterface):
                 fetch_thread = threading.Thread(target=fetch_models_thread)
                 fetch_thread.daemon = True
                 fetch_thread.start()
-                fetch_thread.join(timeout=20.0)  # Increased from 10 to 20 seconds
+                fetch_thread.join(timeout=15.0)  # 15 second timeout
 
                 if fetch_thread.is_alive():
-                    logger.warning(f"Ollama model fetch timed out after 20 seconds")
-                    self._last_error = "Model fetch timed out"
+                    logger.warning("Ollama model fetch timed out after 15 seconds")
                 elif not exception_queue.empty():
-                    e_fetch_thread = exception_queue.get()
-                    self._last_error = f"Error fetching models: {type(e_fetch_thread).__name__} - {e_fetch_thread}"
-                    logger.warning(self._last_error)
+                    e_fetch = exception_queue.get()
+                    logger.warning(f"Error fetching models via library: {e_fetch}")
                 elif not result_queue.empty():
                     models_response_data = result_queue.get()
+                    # Parse response
                     items_to_parse = []
                     if isinstance(models_response_data, dict) and 'models' in models_response_data:
                         items_to_parse = models_response_data['models']
@@ -303,50 +382,45 @@ class OllamaAdapter(BackendInterface):
                         items_to_parse = models_response_data
 
                     for item in items_to_parse:
-                        model_id_to_add = None
+                        model_id = None
                         if isinstance(item, dict):
-                            model_id_to_add = item.get('name') or item.get('model')
-                        elif hasattr(item, 'name') and isinstance(item.name, str):
-                            model_id_to_add = item.name
-                        elif hasattr(item, 'model') and isinstance(item.model, str):
-                            model_id_to_add = item.model
+                            model_id = item.get('name') or item.get('model')
+                        elif hasattr(item, 'name'):
+                            model_id = item.name
 
-                        if model_id_to_add and isinstance(model_id_to_add, str):
-                            model_names.append(model_id_to_add)
+                        if model_id and isinstance(model_id, str):
+                            model_names.append(model_id)
 
-                    logger.info(f"Fetched {len(model_names)} models using ollama library")
+                    success = True
+                    logger.info(f"Fetched {len(model_names)} models using library with timeout")
 
-            except Exception as e_fetch_outer:
-                self._last_error = f"Both API methods failed: {type(e_fetch_outer).__name__} - {e_fetch_outer}"
-                logger.error(self._last_error)
+            except Exception as e_lib:
+                logger.warning(f"Library approach also failed: {e_lib}")
 
-        # If we got models, combine with defaults, otherwise just use defaults
+        # Combine with defaults
         if model_names:
-            logger.info(f"Successfully fetched {len(model_names)} models from Ollama")
             combined_list = list(set(model_names + self._get_default_model_list()))
         else:
             logger.warning("No models fetched from Ollama, using defaults only")
             combined_list = self._get_default_model_list()
 
-        # Sort the final list
+        # Sort and return
         final_model_list = sorted(combined_list, key=self._sort_key_ollama)
 
-        # Ensure current model is included
         if self._model_name and self._is_configured and self._model_name not in final_model_list:
             final_model_list.insert(0, self._model_name)
             final_model_list = sorted(final_model_list, key=self._sort_key_ollama)
 
-        logger.info(f"Returning {len(final_model_list)} total models. First 5: {final_model_list[:5]}")
+        logger.info(f"Returning {len(final_model_list)} total models")
         return final_model_list
 
     def _get_default_model_list(self) -> List[str]:
-        """Get the default model list as fallback"""
+        """Get default model list as fallback."""
         return [
             "qwen2.5-coder:32b", "qwen2.5-coder:14b", "qwen2.5-coder:latest",
             "qwen3:30b", "qwen2:latest", "qwen:latest",
             "devstral:24b", "devstral:latest",
-            "codellama:34b", "codellama:13b", "codellama:13b-instruct",
-            "codellama:13b-python", "codellama:7b", "codellama:latest",
+            "codellama:34b", "codellama:13b", "codellama:7b", "codellama:latest",
             "llama3:30b", "llama3:latest",
             "deepseek-coder:6.7b-instruct-q5_K_M", "deepseek-r1:14b",
             "wizardcoder:13b-python",
@@ -356,14 +430,12 @@ class OllamaAdapter(BackendInterface):
         ]
 
     def _sort_key_ollama(self, model_name_str: str):
-        """Sorting key for Ollama models"""
+        """Sorting key for Ollama models."""
         name_lower = model_name_str.lower()
         is_latest = "latest" in name_lower
-        is_current_adapter_model = model_name_str == self._model_name
+        is_current = model_name_str == self._model_name
 
-        priority = 10  # Default priority
-
-        # Prioritize based on keywords
+        priority = 10
         if "qwen2.5-coder:32b" in name_lower:
             priority = 0
         elif "qwen2.5-coder:14b" in name_lower:
@@ -385,25 +457,27 @@ class OllamaAdapter(BackendInterface):
         elif "mistral" in name_lower or "phi3" in name_lower:
             priority = 9
 
-        size_priority = 100  # Default if no size detected
+        size_priority = 100
         if 'b' in name_lower:
             try:
                 size_match = re.search(r'(\d+(?:\.\d+)?)(?:b|B)', name_lower)
                 if size_match:
-                    size_priority = -float(size_match.group(1))  # Negative for descending size
+                    size_priority = -float(size_match.group(1))
             except:
-                pass  # Ignore parsing errors for size
+                pass
 
         return (
-            0 if is_current_adapter_model else 1,  # Current model first
-            priority,  # Keyword priority
-            size_priority,  # Size (larger first)
-            0 if is_latest else 1,  # "latest" tags
-            name_lower  # Alphabetical as final tie-breaker
+            0 if is_current else 1,
+            priority,
+            size_priority,
+            0 if is_latest else 1,
+            name_lower
         )
 
     def _format_history_for_api(self, history: List[ChatMessage]) -> List[Dict[str, Any]]:
+        """Format history for Ollama API - same as before but with better error handling."""
         ollama_messages: List[Dict[str, Any]] = []
+
         if self._system_prompt:
             ollama_messages.append({"role": "system", "content": self._system_prompt})
 
@@ -413,52 +487,40 @@ class OllamaAdapter(BackendInterface):
                 role_for_api = "user"
             elif msg.role == MODEL_ROLE:
                 role_for_api = "assistant"
-            elif msg.role == SYSTEM_ROLE and not self._system_prompt:  # Only add if adapter doesn't have its own system prompt
+            elif msg.role == SYSTEM_ROLE and not self._system_prompt:
                 role_for_api = "system"
-            elif msg.role == SYSTEM_ROLE and self._system_prompt:  # Adapter system prompt takes precedence
+            elif msg.role == SYSTEM_ROLE and self._system_prompt:
                 continue
             elif msg.role == ERROR_ROLE or (
                     hasattr(msg, 'metadata') and msg.metadata and msg.metadata.get("is_internal")):
-                continue  # Skip error messages or internal system notes
+                continue
             else:
                 logger.warning(f"OllamaAdapter: Skipping message with unhandled role: {msg.role}")
                 continue
 
             message_payload: Dict[str, Any] = {"role": role_for_api}
-            text_content_for_api = msg.text.strip() if hasattr(msg, 'text') and msg.text else ""
+            text_content = msg.text.strip() if hasattr(msg, 'text') and msg.text else ""
 
-            if text_content_for_api:
-                message_payload["content"] = text_content_for_api
-            elif not text_content_for_api and role_for_api == "system" and not self._system_prompt:
-                # If it's a system message from history (and adapter has no system prompt), and it's empty, send empty.
+            if text_content:
+                message_payload["content"] = text_content
+            elif role_for_api == "system" and not self._system_prompt:
                 message_payload["content"] = ""
 
-            # Image handling for Ollama (if model supports it, e.g., LLaVA, BakLLaVA)
+            # Image handling
             if hasattr(msg, 'has_images') and msg.has_images and hasattr(msg, 'image_parts') and msg.image_parts:
                 base64_image_list: List[str] = []
                 for img_part_dict in msg.image_parts:
-                    if isinstance(img_part_dict, dict) and img_part_dict.get("type") == "image" and isinstance(
-                            img_part_dict.get("data"), str):
+                    if isinstance(img_part_dict, dict) and img_part_dict.get("type") == "image":
                         try:
-                            # Ensure data is not empty/whitespace before adding
-                            if len(img_part_dict["data"]) > 10 and not img_part_dict["data"].isspace():
+                            if len(img_part_dict.get("data", "")) > 10:
                                 base64_image_list.append(img_part_dict["data"])
-                            else:
-                                logger.warning("Skipping potentially invalid or empty base64 image data.")
-                        except Exception as e_b64_check:
-                            logger.warning(f"Error checking base64 data in image part: {e_b64_check}")
-                if base64_image_list:
-                    message_payload["images"] = base64_image_list  # Ollama expects list of base64 strings
+                        except Exception as e_img:
+                            logger.warning(f"Error processing image: {e_img}")
 
-            # Add message to API history if it has content or images
+                if base64_image_list:
+                    message_payload["images"] = base64_image_list
+
             if "content" in message_payload or "images" in message_payload:
-                ollama_messages.append(message_payload)
-            elif role_for_api == "system" and not self._system_prompt and "content" not in message_payload:
-                # This handles the case where a system message from history might be role-only
-                # and the adapter itself doesn't have a system prompt.
-                logger.debug(
-                    f"OllamaAdapter: Adding system message (role only) for {self._model_name} because no adapter system prompt is set.")
-                message_payload["content"] = ""  # Ensure content field exists even if empty for system
                 ollama_messages.append(message_payload)
 
         return ollama_messages

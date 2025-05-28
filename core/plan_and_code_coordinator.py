@@ -1,10 +1,11 @@
-# core/plan_and_code_coordinator.py
+# core/plan_and_code_coordinator.py - Streamlined version
 import logging
 import uuid
-import re
 import asyncio
 import os
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Set
+from dataclasses import dataclass, field
+from enum import Enum, auto
 
 from PySide6.QtCore import QObject, Slot
 
@@ -13,23 +14,42 @@ try:
     from core.models import ChatMessage, USER_ROLE, MODEL_ROLE, SYSTEM_ROLE, ERROR_ROLE, MessageLoadingState
     from backends.backend_coordinator import BackendCoordinator
     from services.llm_communication_logger import LlmCommunicationLogger
+    from core.code_output_processor import CodeOutputProcessor, CodeQualityLevel
     from utils import constants
 except ImportError as e_pacc:
     logging.getLogger(__name__).critical(f"PlanAndCodeCoordinator: Critical import error: {e_pacc}", exc_info=True)
-    # Define fallbacks for parsing
-    EventBus = BackendCoordinator = LlmCommunicationLogger = type("Fallback", (object,), {})  # type: ignore
-    ChatMessage, USER_ROLE, MODEL_ROLE, SYSTEM_ROLE, ERROR_ROLE, MessageLoadingState = (type("Fallback", (object,),
-                                                                                             {}),) * 6  # type: ignore
-    constants = type("Fallback", (object,), {"CODER_AI_SYSTEM_PROMPT": ""})  # type: ignore
     raise
 
 logger = logging.getLogger(__name__)
 
-MAX_CONCURRENT_CODERS = 3  # This isn't actively used with current task dispatch, but kept for reference
-MAX_VALIDATION_RETRIES = 1  # Reduce retries for now to simplify debugging validation flow
+
+class SequencePhase(Enum):
+    IDLE = auto()
+    PLANNING = auto()
+    CODE_GENERATION = auto()
+    VALIDATION = auto()
+    FINALIZATION = auto()
+
+
+@dataclass
+class FileGenerationTask:
+    filename: str
+    instructions: str
+    task_type: str
+    request_id: Optional[str] = None
+    generated_code: Optional[str] = None
+    code_quality: Optional[CodeQualityLevel] = None
+    processing_notes: List[str] = field(default_factory=list)
+    validation_passed: bool = False
+    error_message: Optional[str] = None
 
 
 class PlanAndCodeCoordinator(QObject):
+    """
+    Streamlined coordinator focusing on orchestration rather than processing.
+    Heavy lifting is delegated to specialized processors.
+    """
+
     def __init__(self,
                  backend_coordinator: BackendCoordinator,
                  event_bus: EventBus,
@@ -40,989 +60,520 @@ class PlanAndCodeCoordinator(QObject):
         self._event_bus = event_bus
         self._llm_comm_logger = llm_comm_logger
 
-        self._active_planning_request_id: Optional[str] = None
-        self._active_coder_request_ids: Dict[str, str] = {}  # request_id -> filename
-        # self._coder_tasks: List[asyncio.Task] = [] # Not strictly needed with current event-driven completion
+        # Processors
+        self._code_processor = CodeOutputProcessor()
 
-        self._current_plan_text: Optional[str] = None
-        self._parsed_files_list: List[str] = []
-        self._coder_instructions_map: Dict[str, str] = {}  # filename -> instructions
-        self._generated_code_map: Dict[str, Tuple[Optional[str], Optional[str]]] = {}  # filename -> (code, error_msg)
+        # State management
+        self._current_phase = SequencePhase.IDLE
+        self._sequence_id: Optional[str] = None
+        self._planning_request_id: Optional[str] = None
+        self._active_generation_tasks: Dict[str, FileGenerationTask] = {}  # request_id -> task
 
-        # Terminal validation tracking
-        self._validation_retry_count: Dict[str, int] = {}  # filename -> retry_count
-        self._pending_validation_commands: Dict[str, str] = {}  # command_id -> filename
-        self._validation_queue: List[str] = []  # filenames to validate
-        self._current_validation_file: Optional[str] = None
-        self._project_files_dir: Optional[str] = None
+        # Context
+        self._original_query: Optional[str] = None
+        self._project_context = {}
+        self._plan_text: Optional[str] = None
+        self._file_tasks: List[FileGenerationTask] = []
 
-        # Context tracking
-        self._current_project_id: Optional[str] = None
-        self._current_session_id: Optional[str] = None
-        self._original_user_query: Optional[str] = None
-        self._user_task_type: Optional[str] = None  # NEW: Store detected task type
-        self._planner_llm_backend_id: Optional[str] = None  # Store for consistency
-        self._planner_llm_model_name: Optional[str] = None  # Store for consistency
-        self._specialized_llm_backend_id: Optional[str] = None
-        self._specialized_llm_model_name: Optional[str] = None
+        # Connect to events
+        self._event_bus.llmResponseCompleted.connect(self._handle_llm_completion)
+        self._event_bus.llmResponseError.connect(self._handle_llm_error)
+        self._event_bus.terminalCommandCompleted.connect(self._handle_validation_complete)
+        self._event_bus.terminalCommandError.connect(self._handle_validation_error)
 
-        self._event_bus.llmResponseCompleted.connect(self._handle_llm_responses)
-        self._event_bus.llmResponseError.connect(self._handle_llm_errors)
-        self._event_bus.terminalCommandCompleted.connect(self._handle_terminal_command_completed)
-        self._event_bus.terminalCommandError.connect(self._handle_terminal_command_error)
+        logger.info("Streamlined PlanAndCodeCoordinator initialized")
 
-        logger.info("PlanAndCodeCoordinator initialized with terminal validation support.")
+    def start_autonomous_coding(self,
+                                user_query: str,
+                                planner_backend: str,
+                                planner_model: str,
+                                coder_backend: str,
+                                coder_model: str,
+                                project_dir: str,
+                                project_id: Optional[str] = None,
+                                session_id: Optional[str] = None,
+                                task_type: Optional[str] = None) -> bool:
+        """Start the autonomous coding sequence."""
 
-    def _log_comm(self, sender_prefix: str, message: str):
-        if self._llm_comm_logger:
-            # log_message = f"[PACC:{sender_prefix}] {message}" # This was redundant, logger auto-prepends
-            self._llm_comm_logger.log_message(f"PACC:{sender_prefix}", message)
-        else:
-            logger.info(f"PACC_LOG_FALLBACK: [PACC:{sender_prefix}] {message[:150]}...")
+        if self._current_phase != SequencePhase.IDLE:
+            logger.warning("Sequence already active, ignoring new request")
+            self._emit_status("Already processing a request", "#e5c07b", True, 3000)
+            return False
 
-    def _emit_system_message_to_chat(self, message_text: str, is_error: bool = False,
-                                     request_id_ref: Optional[str] = None):
-        """Emit a system message to the current chat context"""
-        if self._current_project_id and self._current_session_id:
-            role = ERROR_ROLE if is_error else SYSTEM_ROLE
-            # Use a consistent ID if this system message is tied to an LLM request, otherwise new UUID
-            msg_id = request_id_ref if request_id_ref else uuid.uuid4().hex
-            sys_msg = ChatMessage(id=msg_id, role=role, parts=[message_text])  # type: ignore
-            self._event_bus.newMessageAddedToHistory.emit(
-                self._current_project_id, self._current_session_id, sys_msg
+        # Initialize sequence
+        self._sequence_id = f"seq_{uuid.uuid4().hex[:8]}"
+        self._current_phase = SequencePhase.PLANNING
+        self._original_query = user_query
+
+        # Store context
+        self._project_context = {
+            'project_dir': project_dir,
+            'project_id': project_id,
+            'session_id': session_id,
+            'task_type': task_type,
+            'planner_backend': planner_backend,
+            'planner_model': planner_model,
+            'coder_backend': coder_backend,
+            'coder_model': coder_model
+        }
+
+        logger.info(f"Starting autonomous coding sequence {self._sequence_id} for: {user_query[:50]}...")
+        self._log_comm("SEQ_START", f"Query: {user_query[:100]}...")
+
+        # Start planning phase
+        return self._start_planning_phase()
+
+    def _start_planning_phase(self) -> bool:
+        """Start the planning phase with the planner LLM."""
+        try:
+            self._planning_request_id = f"plan_{self._sequence_id}"
+
+            # Send status updates
+            self._emit_status(f"Planning with {self._project_context['planner_model']}...", "#61afef", False)
+            self._emit_chat_message(f"[System: Starting autonomous coding for '{self._original_query[:30]}...']")
+            self._event_bus.uiInputBarBusyStateChanged.emit(True)
+
+            # Create planning prompt
+            planning_prompt = self._create_planning_prompt()
+            history = [ChatMessage(role=USER_ROLE, parts=[planning_prompt])]
+
+            # Send to backend
+            self._backend_coordinator.start_llm_streaming_task(
+                request_id=self._planning_request_id,
+                target_backend_id=self._project_context['planner_backend'],
+                history_to_send=history,
+                is_modification_response_expected=True,
+                options={"temperature": 0.3},
+                request_metadata={
+                    "purpose": "autonomous_planning",
+                    "sequence_id": self._sequence_id,
+                    "project_id": self._project_context.get('project_id'),
+                    "session_id": self._project_context.get('session_id')
+                }
             )
-            self._log_comm("CHAT_MSG", f"Sent to UI (Role: {role}): {message_text[:80]}...")
-        else:
-            logger.warning(f"PACC System Message (No P/S context to emit to UI): {message_text}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to start planning phase: {e}", exc_info=True)
+            self._handle_sequence_error(f"Planning initialization failed: {e}")
+            return False
+
+    def _create_planning_prompt(self) -> str:
+        """Create a focused planning prompt."""
+        task_guidance = self._get_task_specific_guidance()
+
+        return f"""You are an expert software architect. Create a detailed plan for implementing this request:
+
+REQUEST: {self._original_query}
+
+PROJECT DIRECTORY: {self._project_context['project_dir']}
+TASK TYPE: {self._project_context.get('task_type', 'general')}
+
+{task_guidance}
+
+Your response MUST follow this EXACT format:
+
+## Architecture Overview
+[Brief 2-3 sentence description of the approach]
+
+## Files Required
+FILES_LIST: ['file1.py', 'file2.py', 'file3.py']
+
+## Implementation Details
+
+### file1.py
+PURPOSE: [What this file does]
+DEPENDENCIES: [Other files it imports/uses] 
+REQUIREMENTS:
+- [Specific requirement 1]
+- [Specific requirement 2]
+- [More requirements...]
+
+### file2.py
+PURPOSE: [What this file does]
+DEPENDENCIES: [Other files it imports/uses]
+REQUIREMENTS:
+- [Specific requirement 1]
+- [Specific requirement 2]
+
+[Continue for each file...]
+
+CRITICAL: The FILES_LIST must be a valid Python list format.
+Each file must have a matching implementation section."""
+
+    def _get_task_specific_guidance(self) -> str:
+        """Get guidance based on detected task type."""
+        task_type = self._project_context.get('task_type', 'general')
+
+        guidance_map = {
+            'api': "Focus on RESTful APIs with proper routing, validation, and error handling.",
+            'data_processing': "Focus on efficient data handling with pandas/numpy and proper error handling.",
+            'ui': "Focus on clean UI design with proper event handling and user experience.",
+            'utility': "Focus on reusable functions with comprehensive error handling and documentation.",
+            'general': "Focus on clean, maintainable code following Python best practices."
+        }
+
+        return guidance_map.get(task_type, guidance_map['general'])
+
+    @Slot(str, object, dict)
+    def _handle_llm_completion(self, request_id: str, message: ChatMessage, metadata: dict):
+        """Handle LLM response completion."""
+        purpose = metadata.get("purpose")
+        sequence_id = metadata.get("sequence_id")
+
+        if sequence_id != self._sequence_id:
+            return  # Not our sequence
+
+        if purpose == "autonomous_planning" and request_id == self._planning_request_id:
+            self._handle_planning_complete(message.text)
+        elif purpose == "autonomous_coding" and request_id in self._active_generation_tasks:
+            self._handle_code_generation_complete(request_id, message.text)
+
+    def _handle_planning_complete(self, plan_text: str):
+        """Handle completion of planning phase."""
+        logger.info("Planning phase completed, parsing plan...")
+        self._plan_text = plan_text
+        self._planning_request_id = None
+
+        try:
+            # Parse the plan into file tasks
+            self._file_tasks = self._parse_plan_response(plan_text)
+
+            if not self._file_tasks:
+                self._handle_sequence_error("No files specified in plan")
+                return
+
+            logger.info(f"Plan parsed successfully: {len(self._file_tasks)} files to generate")
+            self._emit_chat_message(
+                f"[System: Plan created for {len(self._file_tasks)} files. Starting code generation...]")
+
+            # Move to code generation phase
+            self._current_phase = SequencePhase.CODE_GENERATION
+            self._start_code_generation_phase()
+
+        except Exception as e:
+            logger.error(f"Failed to parse plan: {e}", exc_info=True)
+            self._handle_sequence_error(f"Plan parsing failed: {e}")
+
+    def _parse_plan_response(self, plan_text: str) -> List[FileGenerationTask]:
+        """Parse the plan response into file generation tasks."""
+        import re
+
+        tasks = []
+
+        # Extract files list
+        files_match = re.search(r'FILES_LIST:\s*(\[.*?\])', plan_text, re.DOTALL)
+        if not files_match:
+            raise ValueError("FILES_LIST not found in plan")
+
+        try:
+            files_list = eval(files_match.group(1))  # Careful evaluation
+            if not isinstance(files_list, list):
+                raise ValueError("FILES_LIST is not a valid list")
+        except Exception as e:
+            raise ValueError(f"Failed to parse FILES_LIST: {e}")
+
+        # Extract implementation details for each file
+        for filename in files_list:
+            # Find the implementation section
+            section_pattern = rf'### {re.escape(filename)}\s*\n(.*?)(?=\n### |\Z)'
+            section_match = re.search(section_pattern, plan_text, re.DOTALL)
+
+            if section_match:
+                section_content = section_match.group(1).strip()
+                instructions = self._extract_file_instructions(section_content, filename)
+            else:
+                # Fallback instructions
+                instructions = f"Implement {filename} according to the requirements in the plan."
+
+            task = FileGenerationTask(
+                filename=filename,
+                instructions=instructions,
+                task_type=self._detect_file_task_type(filename, instructions)
+            )
+            tasks.append(task)
+
+        return tasks
+
+    def _extract_file_instructions(self, section_content: str, filename: str) -> str:
+        """Extract detailed instructions for a file from its plan section."""
+        lines = section_content.split('\n')
+
+        purpose = ""
+        dependencies = ""
+        requirements = []
+
+        current_section = None
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith('PURPOSE:'):
+                purpose = line[8:].strip()
+                current_section = 'purpose'
+            elif line.startswith('DEPENDENCIES:'):
+                dependencies = line[13:].strip()
+                current_section = 'dependencies'
+            elif line.startswith('REQUIREMENTS:'):
+                current_section = 'requirements'
+            elif line.startswith('- ') and current_section == 'requirements':
+                requirements.append(line[2:].strip())
+
+        # Build comprehensive instructions
+        instructions = f"""File: {filename}
+Purpose: {purpose}
+
+Dependencies: {dependencies}
+
+Detailed Requirements:
+{chr(10).join(f'- {req}' for req in requirements)}
+
+Implementation Notes:
+- Follow Python best practices (PEP 8, type hints, docstrings)
+- Include comprehensive error handling
+- Add logging where appropriate
+- Ensure code is production-ready
+
+OUTPUT FORMAT: Respond with ONLY a Python code block:
+```python
+[YOUR COMPLETE CODE HERE]
+```"""
+
+        return instructions
 
     def _detect_file_task_type(self, filename: str, instructions: str) -> str:
-        """Detect task type for individual files based on filename and instructions"""
+        """Detect task type for a specific file."""
         filename_lower = filename.lower()
         instructions_lower = instructions.lower()
 
-        # Check filename patterns first
-        if any(term in filename_lower for term in ['api', 'server', 'endpoint', 'route', 'handler']):
-            return 'api'
-        elif any(term in filename_lower for term in ['data', 'process', 'parse', 'etl', 'csv', 'json']):
-            return 'data_processing'
-        elif any(term in filename_lower for term in ['ui', 'window', 'dialog', 'widget', 'gui', 'interface']):
-            return 'ui'
-        elif any(term in filename_lower for term in ['util', 'helper', 'tool', 'lib', 'common']):
-            return 'utility'
-        elif filename_lower in ['main.py', 'app.py', 'run.py', '__main__.py']:
-            return 'general'  # Main files usually coordinate everything
+        # File name patterns
+        patterns = {
+            'api': ['api', 'server', 'endpoint', 'route', 'handler'],
+            'data_processing': ['data', 'process', 'parse', 'etl', 'csv', 'json'],
+            'ui': ['ui', 'window', 'dialog', 'widget', 'gui', 'interface'],
+            'utility': ['util', 'helper', 'tool', 'lib', 'common']
+        }
 
-        # Check instructions content
-        api_keywords = ['endpoint', 'route', 'api', 'fastapi', 'flask', 'http', 'rest', 'server']
-        data_keywords = ['data', 'csv', 'json', 'parse', 'process', 'pandas', 'numpy', 'database']
-        ui_keywords = ['ui', 'interface', 'window', 'dialog', 'widget', 'pyside', 'qt', 'gui']
+        for task_type, keywords in patterns.items():
+            if any(keyword in filename_lower for keyword in keywords):
+                return task_type
+            if any(keyword in instructions_lower for keyword in keywords):
+                return task_type
 
-        if any(keyword in instructions_lower for keyword in api_keywords):
-            return 'api'
-        elif any(keyword in instructions_lower for keyword in data_keywords):
-            return 'data_processing'
-        elif any(keyword in instructions_lower for keyword in ui_keywords):
-            return 'ui'
+        return 'general'
 
-        # Fall back to the project-level task type or general
-        return self._user_task_type or 'general'
+    def _start_code_generation_phase(self):
+        """Start generating code for all files."""
+        self._emit_status(f"Generating code for {len(self._file_tasks)} files...", "#61afef", False)
 
-    def start_planning_sequence(self,
-                                user_query: str,
-                                planner_llm_backend_id: str,
-                                planner_llm_model_name: str,
-                                planner_llm_temperature: float,
-                                specialized_llm_backend_id: str,
-                                specialized_llm_model_name: str,
-                                project_files_dir: Optional[str] = None,
-                                project_id: Optional[str] = None,
-                                session_id: Optional[str] = None,
-                                user_task_type: Optional[str] = None):  # NEW PARAMETER
-        if self._active_planning_request_id or self._active_coder_request_ids:
-            logger.warning("PACC: Planning or coding sequence already active. Ignoring new request.")
-            self._event_bus.uiStatusUpdateGlobal.emit("Coordinator is already working on a task!", "#e5c07b", True,
-                                                      3000)
-            return
+        # Start generation for all files (they'll be processed as they complete)
+        for task in self._file_tasks:
+            self._start_single_file_generation(task)
 
-        self._reset_sequence_state()  # Ensure clean state before starting
+    def _start_single_file_generation(self, task: FileGenerationTask):
+        """Start code generation for a single file."""
+        task.request_id = f"code_{self._sequence_id}_{task.filename.replace('.', '_').replace('/', '_')}"
+        self._active_generation_tasks[task.request_id] = task
 
-        self._original_user_query = user_query
-        self._user_task_type = user_task_type  # NEW: Store the detected task type
-        self._planner_llm_backend_id = planner_llm_backend_id
-        self._planner_llm_model_name = planner_llm_model_name
-        self._specialized_llm_backend_id = specialized_llm_backend_id
-        self._specialized_llm_model_name = specialized_llm_model_name
-        self._project_files_dir = project_files_dir or os.getcwd()
-        self._current_project_id = project_id
-        self._current_session_id = session_id
+        # Create coding prompt
+        coding_prompt = self._create_coding_prompt(task)
+        history = [ChatMessage(role=USER_ROLE, parts=[coding_prompt])]
 
-        self._active_planning_request_id = f"planner_req_{uuid.uuid4().hex[:12]}"
-
-        self._log_comm("SEQ_START",
-                       f"Planning for query: '{user_query[:50]}...' (Task: {user_task_type}, PlannerReqID: {self._active_planning_request_id})")
-        self._event_bus.uiStatusUpdateGlobal.emit(f"Asking Planner ({planner_llm_model_name}) to create a plan...",
-                                                  "#61afef", False, 0)
-        self._event_bus.uiInputBarBusyStateChanged.emit(True)
-
-        # --- ADD PLANNER PLACEHOLDER MESSAGE ---
-        if self._current_project_id and self._current_session_id:
-            planner_placeholder_text = f"[System: Planner AI ({self._planner_llm_model_name}) is generating a plan for '{self._original_user_query[:30]}...' ⏳]"
-            planner_placeholder_msg = ChatMessage(
-                id=self._active_planning_request_id,  # Use planner's request ID
-                role=MODEL_ROLE,  # Display as an AI response being generated
-                parts=[planner_placeholder_text],
-                loading_state=MessageLoadingState.LOADING,  # type: ignore
-                metadata={"purpose": "plan_and_code_planner_placeholder",
-                          "pacc_request_id": self._active_planning_request_id}
-            )
-            self._event_bus.newMessageAddedToHistory.emit(
-                self._current_project_id,
-                self._current_session_id,
-                planner_placeholder_msg
-            )
-            self._log_comm("UI_MSG_ADD", f"Planner placeholder sent for ReqID: {self._active_planning_request_id}")
-        else:
-            logger.warning("PACC: No P/S context, cannot send planner placeholder message to UI.")
-        # --- END PLANNER PLACEHOLDER ---
-
-        planner_prompt_text = self._construct_planner_prompt(user_query)
-        history_for_planner = [ChatMessage(role=USER_ROLE, parts=[planner_prompt_text])]  # type: ignore
-
+        # Send to backend
         self._backend_coordinator.start_llm_streaming_task(
-            request_id=self._active_planning_request_id,
-            target_backend_id=planner_llm_backend_id,
-            history_to_send=history_for_planner,
+            request_id=task.request_id,
+            target_backend_id=self._project_context['coder_backend'],
+            history_to_send=history,
             is_modification_response_expected=True,
-            options={"temperature": planner_llm_temperature},
+            options={"temperature": 0.1},  # Low temperature for code generation
             request_metadata={
-                "purpose": "plan_and_code_planner",
-                "pacc_request_id": self._active_planning_request_id,
-                # Ensure PACC ID is passed for LLM response routing
-                "project_id": self._current_project_id,
-                "session_id": self._current_session_id
+                "purpose": "autonomous_coding",
+                "sequence_id": self._sequence_id,
+                "filename": task.filename,
+                "project_id": self._project_context.get('project_id'),
+                "session_id": self._project_context.get('session_id')
             }
         )
 
-    def _construct_planner_prompt(self, user_query: str) -> str:
-        """Construct a task-specific planning prompt"""
-        base_prompt = [
-            "You are an expert AI system planner and technical architect. Your task is to prepare a comprehensive plan and highly detailed instructions for a separate Coder AI to implement a user's request.",
-            f"The user's request is: \"{user_query}\"",
-            f"\nProject directory: {self._project_files_dir}",
-        ]
+        logger.info(f"Started code generation for {task.filename} (request: {task.request_id})")
 
-        # Add task-specific guidance based on detected task type
-        if self._user_task_type == 'api':
-            base_prompt.append("\nTASK TYPE: API Development")
-            base_prompt.append(
-                "Focus on creating RESTful APIs with proper routing, request/response handling, validation, and error handling. Consider using FastAPI or Flask frameworks.")
-        elif self._user_task_type == 'data_processing':
-            base_prompt.append("\nTASK TYPE: Data Processing")
-            base_prompt.append(
-                "Focus on efficient data handling, parsing, transformation, and analysis. Consider using pandas, numpy, or appropriate data processing libraries.")
-        elif self._user_task_type == 'ui':
-            base_prompt.append("\nTASK TYPE: User Interface")
-            base_prompt.append(
-                "Focus on creating intuitive user interfaces with proper layout, event handling, and user experience. Consider using PySide6/PyQt6 for desktop applications.")
-        elif self._user_task_type == 'utility':
-            base_prompt.append("\nTASK TYPE: Utility/Helper Functions")
-            base_prompt.append(
-                "Focus on creating reusable, well-documented utility functions with proper error handling and testing capabilities.")
-        else:
-            base_prompt.append("\nTASK TYPE: General Development")
-            base_prompt.append("Focus on clean, maintainable code with proper structure and best practices.")
+    def _create_coding_prompt(self, task: FileGenerationTask) -> str:
+        """Create a focused coding prompt for a specific file."""
+        return f"""You are a Python code generation specialist. Generate complete, working code for:
 
-        base_prompt.extend([
-            "\nYour response MUST be structured as follows:",
-            "1.  **Overall Design Philosophy:** Briefly (1-2 sentences) describe the approach for the project structure and main components.",
-            "",
-            "2.  **Files Planned:** EXACTLY in this format:",
-            "FILES_PLANNED: ['relative/path/file1.py', 'relative/path/file2.py', 'relative/path/file3.py']",
-            "",
-            "IMPORTANT: The FILES_PLANNED line must be EXACTLY as shown above - start with 'FILES_PLANNED:' followed by a Python list.",
-            "Example: FILES_PLANNED: ['calculator.py', 'utils.py', 'main.py']",
-            "",
-            "3.  **Per-File Coder Instructions:** For EACH file in FILES_PLANNED, provide detailed instructions:",
-            "",
-            "--- CODER_INSTRUCTIONS_START: relative/path/filename.py ---",
-            "File Purpose: [Brief description of this file's role.]",
-            "Is New File: Yes",  # Or 'No' if modifying existing
-            "Inter-File Dependencies: [List other planned files this file interacts with, and how.]",
-            "Key Requirements:",
-            "- [Detailed instruction 1 for Coder AI. Be explicit: function signatures with type hints, class structures, logic flow, error handling, etc.]",
-            "- [Detailed instruction 2...]",
-            "- [More detailed instructions...]",
-            "Imports Needed: [Suggest specific imports required for this file.]",
-            "IMPORTANT CODER OUTPUT FORMAT: The Coder AI MUST respond with ONE single Markdown fenced code block: ```python\\nCODE_HERE\\n```. NO other text.",
-            "--- CODER_INSTRUCTIONS_END: relative/path/filename.py ---",
-            "",
-            "Ensure the Coder AI instructions are thorough enough for a separate, specialized code generation AI to produce complete and correct code for each file.",
-            "Focus on clarity, modularity, and best practices. The Coder AI will use a dedicated system prompt focused on code quality (PEP 8, type hints, docstrings, robustness).",
-            "",
-            "CRITICAL REMINDERS:",
-            "- FILES_PLANNED must be a valid Python list format",
-            "- Each file needs matching CODER_INSTRUCTIONS_START/END blocks",
-            "- Generated code will be automatically validated using linting tools",
-            "",
-            "Example structure for a calculator request:",
-            "FILES_PLANNED: ['calculator.py', 'main.py']"
-        ])
-        return "\n".join(base_prompt)
+FILE: {task.filename}
+TASK TYPE: {task.task_type}
 
-    def _parse_planner_response(self, plan_text: str) -> bool:
-        self._parsed_files_list = []
-        self._coder_instructions_map = {}
+INSTRUCTIONS:
+{task.instructions}
 
-        try:
-            files_planned_patterns = [
-                r"FILES_PLANNED:\s*(\[.*?\])",
-                r"Files?\s*Planned:\s*(\[.*?\])",
-                r"FILES_PLANNED\s*=\s*(\[.*?\])",
-                r"files?_planned:\s*(\[.*?\])",
-                r"(?:FILES_PLANNED|Files?\s*Planned).*?(\[.*?\])",
-            ]
-            files_planned_match = None
-            files_list_str = ""  # Initialize to avoid UnboundLocalError
+CRITICAL REQUIREMENTS:
+1. Respond with ONLY a single Python code block
+2. Use this EXACT format: ```python\\n[CODE]\\n```
+3. NO explanatory text outside the code block
+4. Include all necessary imports at the top
+5. Add proper docstrings and type hints
+6. Include comprehensive error handling
+7. Follow PEP 8 style guidelines
 
-            for pattern in files_planned_patterns:
-                files_planned_match = re.search(pattern, plan_text, re.DOTALL | re.IGNORECASE)
-                if files_planned_match:
-                    logger.info(f"PACC: Found FILES_PLANNED using pattern: {pattern}")
-                    files_list_str = files_planned_match.group(
-                        1) if files_planned_match.groups() and files_planned_match.group(
-                        1) else files_planned_match.group(0)
-                    break
+The code must be complete and ready to run."""
 
-            if not files_planned_match:
-                logger.error("PACC: Could not find 'FILES_PLANNED:' section in planner response.")
-                logger.error(f"PACC: Planner response preview: {plan_text[:500]}...")
-                self._log_comm("Parser", "Error: 'FILES_PLANNED:' section not found.")
-                # Attempt fallback extraction of any Python list
-                fallback_match = re.search(r"\[\s*(?:['\"][^'\"]*['\"],?\s*)*\s*\]", plan_text)
-                if fallback_match:
-                    logger.warning("PACC: Attempting fallback list extraction for FILES_PLANNED...")
-                    files_list_str = fallback_match.group(0)
-                else:
-                    logger.error("PACC: Fallback list extraction also failed for FILES_PLANNED.")
-                    return False
-
-            logger.info(f"PACC: Extracted files list string: {files_list_str}")
-            try:
-                parsed_list_candidate = eval(files_list_str)  # Use eval carefully, ensure string is somewhat validated
-                if not isinstance(parsed_list_candidate, list):
-                    logger.error(f"PACC: 'FILES_PLANNED' content is not a list: {files_list_str}")
-                    self._log_comm("Parser", f"Error: 'FILES_PLANNED' content not a list: {files_list_str[:100]}...")
-                    return False
-                self._parsed_files_list = [str(f).strip().replace("\\", "/") for f in parsed_list_candidate if
-                                           isinstance(f, str) and f.strip()]
-            except Exception as e_eval:
-                logger.error(f"PACC: Error evaluating FILES_PLANNED list string '{files_list_str}': {e_eval}",
-                             exc_info=True)
-                self._log_comm("Parser", f"Error evaluating FILES_PLANNED: {e_eval}")
-                return False
-
-            if not self._parsed_files_list:
-                logger.info("PACC: Planner indicated no files to be generated in the FILES_PLANNED list.")
-                self._log_comm("Parser", "Info: FILES_PLANNED list is empty.")
-                return True  # This is a valid outcome
-
-            self._generated_code_map = {fname: (None, None) for fname in self._parsed_files_list}
-            self._validation_retry_count = {fname: 0 for fname in self._parsed_files_list}
-            logger.info(f"PACC: Parsed planned files: {self._parsed_files_list}")
-            self._log_comm("Parser", f"Successfully parsed file list: {self._parsed_files_list}")
-
-            missing_instructions_for_files = []
-            for filename in self._parsed_files_list:
-                normalized_filename_for_marker = filename.replace("\\", "/")  # Normalize for regex
-                instruction_patterns = [
-                    # Strict match first
-                    f"--- CODER_INSTRUCTIONS_START: {re.escape(normalized_filename_for_marker)} ---(.*?)--- CODER_INSTRUCTIONS_END: {re.escape(normalized_filename_for_marker)} ---",
-                    # More lenient if strict fails
-                    f"(?:CODER_INSTRUCTIONS_START|Instructions for)\\s*:\\s*{re.escape(normalized_filename_for_marker)}.*?\n(.*?)(?=(?:--- CODER_INSTRUCTIONS_END:|Instructions for|CODER_INSTRUCTIONS_START:|$))"
-                ]
-                instruction_text = None
-                for idx, pattern in enumerate(instruction_patterns):
-                    instruction_match = re.search(pattern, plan_text, re.DOTALL | re.IGNORECASE)
-                    if instruction_match:
-                        instruction_text = instruction_match.group(1).strip()
-                        logger.info(f"PACC: Found instructions for {filename} using pattern #{idx + 1}")
-                        break
-
-                if instruction_text:
-                    self._coder_instructions_map[filename] = instruction_text
-                else:
-                    logger.warning(f"PACC: Could not find coder instructions for file: {filename} using any pattern.")
-                    fallback_instructions = (f"File Purpose: Implementation for {filename}\n"
-                                             f"Is New File: Yes\n"
-                                             f"Key Requirements:\n"
-                                             f"- Implement main functionality for {filename}\n"
-                                             f"- Follow Python best practices, type hints, docstrings\n"
-                                             f"- Robust error handling\n"
-                                             f"- Modular code\n"
-                                             f"Imports Needed: Standard Python libraries as needed\n"
-                                             f"IMPORTANT CODER OUTPUT FORMAT: Respond with ONE single Markdown fenced code block: ```python\\nCODE_HERE\\n```. NO other text.")
-                    self._coder_instructions_map[filename] = fallback_instructions.strip()
-                    missing_instructions_for_files.append(filename)
-
-            if missing_instructions_for_files:
-                logger.warning(f"PACC: Using fallback instructions for files: {missing_instructions_for_files}")
-                self._log_comm("Parser",
-                               f"Warning: Using fallback instructions for: {', '.join(missing_instructions_for_files)}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"PACC: Critical error parsing planner response: {e}", exc_info=True)
-            self._log_comm("Parser", f"Critical parsing error: {e}")
-            return False
-
-    async def _dispatch_code_generation_tasks_async(self):
-        if not self._parsed_files_list or not self._coder_instructions_map:
-            logger.warning("PACC: No parsed files or instructions to dispatch for code generation.")
-            self._emit_system_message_to_chat(
-                "[System: Planner did not specify files or instructions. Cannot generate code.]", is_error=True)
-            self._event_bus.uiStatusUpdateGlobal.emit("No files or instructions from plan to generate.", "#e5c07b",
-                                                      True, 4000)
-            self._reset_sequence_state()  # Resets busy state too
+    def _handle_code_generation_complete(self, request_id: str, raw_response: str):
+        """Handle completion of code generation for a file."""
+        task = self._active_generation_tasks.get(request_id)
+        if not task:
+            logger.warning(f"No task found for request {request_id}")
             return
 
-        self._log_comm("DISPATCH", f"Starting code generation for {len(self._parsed_files_list)} files.")
-        self._emit_system_message_to_chat(
-            f"[System: Starting code generation for {len(self._parsed_files_list)} files...]")
-        self._event_bus.uiStatusUpdateGlobal.emit(f"Sending {len(self._parsed_files_list)} file(s) to Code LLM...",
-                                                  "#61afef", False, 0)
-        # Input bar busy state should already be true from planner
+        logger.info(f"Code generation completed for {task.filename}")
 
-        for filename in self._parsed_files_list:
-            instructions = self._coder_instructions_map.get(filename)
-            if not instructions or instructions.startswith("[Error:"):  # Check for explicit error messages
-                logger.warning(f"PACC: Skipping code generation for '{filename}' due to missing/error in instructions.")
-                self._generated_code_map[filename] = (None, instructions or "Instructions were missing or invalid.")
-                self._emit_system_message_to_chat(
-                    f"[System Error: Skipping code generation for `{filename}` due to missing/invalid instructions from planner.]",
-                    is_error=True)
-                continue
+        # Process the response using our specialized processor
+        extracted_code, quality, notes = self._code_processor.process_llm_response(
+            raw_response, task.filename, "python"
+        )
 
-            # Start the code generation task (don't await it here, let event handlers manage completion)
-            await self._generate_single_file_code_async(filename, instructions)
+        # Update task with results
+        task.generated_code = extracted_code
+        task.code_quality = quality
+        task.processing_notes = notes
 
-        if not self._active_coder_request_ids:  # If no valid tasks were started
-            logger.warning("PACC: No valid coder tasks were started after dispatch attempt.")
-            self._handle_all_coder_tasks_done()  # This will then lead to final completion
-
-    def _handle_all_coder_tasks_done(self):
-        logger.info("PACC: All coder tasks have completed (or errored). Preparing for validation or finalization.")
-        self._log_comm("CODERS_DONE", "All individual file generation tasks finished.")
-
-        if self._active_coder_request_ids:  # Should be empty if truly all done
-            logger.warning(
-                f"PACC: _handle_all_coder_tasks_done called, but {len(self._active_coder_request_ids)} tasks still marked active. This might be a race condition or error. Active IDs: {list(self._active_coder_request_ids.keys())}")
-            # Don't proceed if there's a mismatch in state.
-            # This might require a timeout mechanism or more robust tracking if it happens often.
-            return
-
-        successfully_generated_files_for_validation = []
-        for filename in self._parsed_files_list:
-            code, err_msg = self._generated_code_map.get(filename, (None, "Result not stored."))
-            if code and not err_msg:  # Successfully generated code
-                self._write_file_to_disk(filename, code)  # Write before validation
-                successfully_generated_files_for_validation.append(filename)
-            elif err_msg:
-                self._emit_system_message_to_chat(
-                    f"[System Error: Code generation failed for `{filename}`: {err_msg[:100]}...]", is_error=True,
-                    request_id_ref=filename)  # Use filename as a loose ref ID for UI
-            else:  # No code and no error message - implies task might not have run or had an unlogged issue
-                self._emit_system_message_to_chat(
-                    f"[System Error: Code generation for `{filename}` did not produce output or an error message.]",
-                    is_error=True, request_id_ref=filename)
-
-        if successfully_generated_files_for_validation:
-            self._log_comm("VALIDATE_START",
-                           f"Starting validation for {len(successfully_generated_files_for_validation)} files...")
-            self._emit_system_message_to_chat(
-                f"[System: Code generation complete. Starting validation for {len(successfully_generated_files_for_validation)} files...]")
-            self._event_bus.uiStatusUpdateGlobal.emit(
-                f"Code generated for {len(successfully_generated_files_for_validation)} files. Starting validation...",
-                "#61afef", False, 0)
-            self._validation_queue = successfully_generated_files_for_validation[:]  # Copy
-            self._start_next_validation()
+        if extracted_code and quality in [CodeQualityLevel.EXCELLENT, CodeQualityLevel.GOOD,
+                                          CodeQualityLevel.ACCEPTABLE]:
+            # Write to disk
+            self._write_file_to_disk(task.filename, extracted_code)
+            logger.info(f"Successfully generated {task.filename} (Quality: {quality.name})")
         else:
-            logger.info("PACC: No files were successfully generated for validation. Moving to final completion.")
-            self._emit_system_message_to_chat(
-                "[System: No files were successfully generated by Code LLM. Nothing to validate.]", is_error=True)
-            self._handle_final_completion()
+            task.error_message = f"Code extraction failed: {', '.join(notes)}"
+            logger.warning(f"Failed to generate {task.filename}: {task.error_message}")
+
+        # Clean up
+        del self._active_generation_tasks[request_id]
+
+        # Check if all tasks are complete
+        if not self._active_generation_tasks:
+            self._handle_all_generation_complete()
 
     def _write_file_to_disk(self, filename: str, content: str):
-        if not self._project_files_dir:
-            logger.error(f"PACC: Project files directory not set. Cannot write file {filename}.")
-            self._log_comm("FILE_WRITE_ERR", f"Project dir not set for {filename}")
-            return
+        """Write generated file to disk."""
         try:
-            # Normalize path components to avoid issues with mixed slashes if any
-            normalized_filename = os.path.normpath(filename)
-            file_path = os.path.join(self._project_files_dir, normalized_filename)
+            project_dir = self._project_context['project_dir']
+            file_path = os.path.join(project_dir, filename)
 
-            # Ensure parent directories exist
+            # Ensure directory exists
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
+            # Clean and format the code
+            clean_content = self._code_processor.clean_and_format_code(content)
+
+            # Write file
             with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            logger.info(f"PACC: Written file to disk: {file_path}")
-            self._log_comm("FILE_WRITE_OK", f"Created/Updated: {filename}")
+                f.write(clean_content)
+
+            logger.info(f"Wrote file: {file_path}")
+
         except Exception as e:
-            logger.error(f"PACC: Error writing file {filename} to {file_path}: {e}", exc_info=True)
-            self._log_comm("FILE_WRITE_ERR", f"Error writing {filename}: {e}")
+            logger.error(f"Failed to write {filename}: {e}", exc_info=True)
 
-    def _start_next_validation(self):
-        if not self._validation_queue:
-            logger.info("PACC: Validation queue empty. Moving to final completion.")
-            self._handle_final_completion()
-            return
+    def _handle_all_generation_complete(self):
+        """Handle completion of all code generation tasks."""
+        logger.info("All code generation tasks completed")
 
-        self._current_validation_file = self._validation_queue.pop(0)
-        self._log_comm("VALIDATE_FILE", f"Validating: {self._current_validation_file}")
-        self._emit_system_message_to_chat(f"[System: Validating `{self._current_validation_file}`...]")
+        # Count results
+        successful = [t for t in self._file_tasks if t.generated_code and not t.error_message]
+        failed = [t for t in self._file_tasks if t.error_message or not t.generated_code]
 
-        if self._current_validation_file.endswith('.py'):
-            self._validate_python_file(self._current_validation_file)
-        else:
-            logger.info(f"PACC: Skipping validation for non-Python file: {self._current_validation_file}")
-            self._log_comm("VALIDATE_SKIP", f"Non-Python file: {self._current_validation_file}")
-            self._start_next_validation()  # Move to next
+        # Send files to code viewer
+        for task in successful:
+            if task.generated_code:
+                self._event_bus.modificationFileReadyForDisplay.emit(task.filename, task.generated_code)
 
-    def _validate_python_file(self, filename: str):
-        if not self._project_files_dir:
-            logger.error(f"PACC: Project files directory not set. Cannot validate {filename}.")
-            self._handle_validation_failure(filename, "Project directory not configured for validation.")
-            return
+        # Create summary
+        summary_parts = [
+            f"[System: Autonomous coding completed for '{self._original_query[:50]}...']",
+            f"Successfully generated: {len(successful)} files",
+        ]
 
-        file_path = os.path.join(self._project_files_dir, filename)
-        if not os.path.exists(file_path):
-            logger.error(f"PACC: File {file_path} not found on disk for validation.")
-            self._handle_validation_failure(filename, "File not found on disk for validation.")
-            return
+        if successful:
+            files_list = ", ".join(f"`{t.filename}`" for t in successful)
+            summary_parts.append(f"Files: {files_list}")
 
-        command = f"python -m py_compile \"{file_path}\""  # Ensure path is quoted for spaces
-        command_id = f"validate_{uuid.uuid4().hex[:8]}"
-        self._pending_validation_commands[command_id] = filename
-        self._log_comm("TERM_CMD_REQ", f"Validation cmd for {filename}: {command} (ID: {command_id})")
-        self._event_bus.terminalCommandRequested.emit(command, self._project_files_dir, command_id)
+        if failed:
+            summary_parts.append(f"Failed: {len(failed)} files")
 
-    @Slot(str, int, float)
-    def _handle_terminal_command_completed(self, command_id: str, exit_code: int, execution_time: float):
-        if command_id not in self._pending_validation_commands:
-            logger.debug(f"PACC: Terminal command {command_id} completed, but not a pending validation command.")
-            return
+        self._emit_chat_message(" ".join(summary_parts))
 
-        filename = self._pending_validation_commands.pop(command_id)
-        logger.info(
-            f"PACC: Validation command for '{filename}' (ID: {command_id}) completed with exit code {exit_code}.")
+        # Emit final status
+        color = "#98c379" if not failed else "#e5c07b" if successful else "#FF6B6B"
+        self._emit_status(f"Generated {len(successful)}/{len(self._file_tasks)} files", color, False)
 
-        if exit_code == 0:
-            self._log_comm("VALIDATE_PASS", f"✓ Validation passed for: {filename}")
-            self._emit_system_message_to_chat(f"[System: Validation PASSED for `{filename}`. ✅]")
-            self._start_next_validation()
-        else:
-            self._log_comm("VALIDATE_FAIL", f"✗ Validation failed (exit {exit_code}) for: {filename}")
-            self._emit_system_message_to_chat(
-                f"[System Error: Validation FAILED for `{filename}` (exit code {exit_code}). See LLM log for details. ❌]",
-                is_error=True)
-            # Log the terminal output from LLM Communication Logger (it should have received it)
-            # For now, just mark as failure and continue
-            self._handle_validation_failure(filename, f"py_compile failed with exit code {exit_code}")
+        # Reset state
+        self._reset_sequence()
 
     @Slot(str, str)
-    def _handle_terminal_command_error(self, command_id: str, error_message: str):
-        if command_id not in self._pending_validation_commands:
-            logger.debug(f"PACC: Terminal command error for {command_id}, but not a pending validation command.")
-            return
+    def _handle_llm_error(self, request_id: str, error_message: str):
+        """Handle LLM errors."""
+        if request_id == self._planning_request_id:
+            self._handle_sequence_error(f"Planning failed: {error_message}")
+        elif request_id in self._active_generation_tasks:
+            task = self._active_generation_tasks[request_id]
+            task.error_message = f"Generation failed: {error_message}"
+            del self._active_generation_tasks[request_id]
 
-        filename = self._pending_validation_commands.pop(command_id)
-        logger.error(f"PACC: Validation command for '{filename}' (ID: {command_id}) failed with error: {error_message}")
-        self._log_comm("VALIDATE_ERR", f"✗ Validation command error for {filename}: {error_message}")
-        self._emit_system_message_to_chat(
-            f"[System Error: Validation command for `{filename}` failed: {error_message[:100]}... ❌]", is_error=True)
-        self._handle_validation_failure(filename, f"Terminal execution error: {error_message}")
+            if not self._active_generation_tasks:
+                self._handle_all_generation_complete()
 
-    def _handle_validation_failure(self, filename: str, error_message: str):
-        # Currently, we don't retry with LLM fixes. Just log and move on.
-        # This could be expanded in the future.
-        logger.warning(f"PACC: Validation failed permanently for '{filename}'. Error: {error_message}")
-        # Mark this file as having a validation error in _generated_code_map if needed
-        if filename in self._generated_code_map:
-            code, _ = self._generated_code_map[filename]
-            self._generated_code_map[filename] = (code, f"Validation Failed: {error_message}")
-        else:  # Should not happen if logic is correct
-            self._generated_code_map[filename] = (None, f"Validation Failed (code not found): {error_message}")
+    def _handle_sequence_error(self, error_message: str):
+        """Handle sequence-level errors."""
+        logger.error(f"Sequence error: {error_message}")
+        self._emit_chat_message(f"[System Error: {error_message}]", is_error=True)
+        self._emit_status(f"Autonomous coding failed: {error_message}", "#FF6B6B", False)
+        self._reset_sequence()
 
-        self._start_next_validation()  # Proceed to the next file
+    def _reset_sequence(self):
+        """Reset sequence state."""
+        self._current_phase = SequencePhase.IDLE
+        self._sequence_id = None
+        self._planning_request_id = None
+        self._active_generation_tasks.clear()
+        self._original_query = None
+        self._project_context.clear()
+        self._plan_text = None
+        self._file_tasks.clear()
 
-    def _handle_final_completion(self):
-        logger.info("PACC: All code generation and validation processes complete. Finalizing sequence.")
-        self._log_comm("SEQ_FINALIZE", "All generation and validation done.")
-
-        successful_files_final = []
-        failed_files_with_errors_final: Dict[str, str] = {}
-
-        for filename in self._parsed_files_list:  # Iterate over initially planned files
-            code, err_msg = self._generated_code_map.get(filename, (None, "Generation/validation result not recorded."))
-
-            if code and not err_msg:  # Code exists and no error message (implies validation passed or not applicable)
-                successful_files_final.append(filename)
-                self._log_comm("FINAL_CODE_OK", f"Finalized code for {filename}.")
-                self._event_bus.modificationFileReadyForDisplay.emit(filename, code)
-            else:  # Code might exist but there's an error, or code doesn't exist and there's an error
-                final_error_msg = err_msg or "Unknown error or missing code."
-                failed_files_with_errors_final[filename] = final_error_msg
-                self._log_comm("FINAL_CODE_ERR", f"Final error for {filename}: {final_error_msg}")
-                # Display even failed/raw code if available, with a note
-                if code:  # Code was generated but validation failed or other error
-                    self._event_bus.modificationFileReadyForDisplay.emit(filename,
-                                                                         f"# VALIDATION FAILED or ERROR: {final_error_msg}\n\n{code}")
-                else:  # No code was generated
-                    self._event_bus.modificationFileReadyForDisplay.emit(filename,
-                                                                         f"# CODE GENERATION FAILED: {final_error_msg}")
-
-        summary_parts = [f"[System: Autonomous coding sequence for '{self._original_user_query[:50]}...' has finished."]
-        if successful_files_final:
-            summary_parts.append(
-                f"Successfully generated/validated: {', '.join(f'`{f}`' for f in successful_files_final)}.")
-        if failed_files_with_errors_final:
-            failed_details = ", ".join(
-                [f"`{f}` ({failed_files_with_errors_final[f][:30]}...)" for f in failed_files_with_errors_final])
-            summary_parts.append(f"Issues encountered for: {failed_details}.")
-        if not successful_files_final and not failed_files_with_errors_final and self._parsed_files_list:
-            summary_parts.append("No files were processed or results are unclear. Check logs.")
-        elif not self._parsed_files_list:
-            summary_parts.append("Planner did not specify any files to generate.")
-
-        final_status_msg_for_chat = " ".join(summary_parts)
-        self._emit_system_message_to_chat(final_status_msg_for_chat, is_error=bool(failed_files_with_errors_final))
-
-        final_ui_status_msg = f"Autonomous coding finished. Success: {len(successful_files_final)}, Issues: {len(failed_files_with_errors_final)}"
-        final_ui_status_color = "#56b6c2" if not failed_files_with_errors_final else "#e06c75" if successful_files_final else "#FF6B6B"
-        self._event_bus.uiStatusUpdateGlobal.emit(final_ui_status_msg, final_ui_status_color, False, 0)
         self._event_bus.uiInputBarBusyStateChanged.emit(False)
-        self._reset_sequence_state()
+        logger.info("Sequence state reset")
 
-    def _reset_sequence_state(self):
-        logger.info("PACC: Full sequence state reset.")
-        self._active_planning_request_id = None
-        self._active_coder_request_ids.clear()
-        self._current_plan_text = None
-        self._parsed_files_list.clear()
-        self._coder_instructions_map.clear()
-        self._generated_code_map.clear()
-        self._validation_retry_count.clear()
-        self._pending_validation_commands.clear()
-        self._validation_queue.clear()
-        self._current_validation_file = None
-        self._project_files_dir = None
+    # Validation methods (simplified placeholders)
+    @Slot(str, int, float)
+    def _handle_validation_complete(self, command_id: str, exit_code: int, execution_time: float):
+        """Handle validation completion - placeholder for future implementation."""
+        pass
 
-        # Clear context fields
-        self._current_project_id = None
-        self._current_session_id = None
-        self._original_user_query = None
-        self._user_task_type = None  # NEW: Reset task type
-        self._planner_llm_backend_id = None
-        self._planner_llm_model_name = None
-        self._specialized_llm_backend_id = None
-        self._specialized_llm_model_name = None
+    @Slot(str, str)
+    def _handle_validation_error(self, command_id: str, error_message: str):
+        """Handle validation errors - placeholder for future implementation."""
+        pass
 
-        # Ensure input bar is re-enabled if it was left busy
-        # This is now handled by _handle_final_completion emitting uiInputBarBusyStateChanged(False)
-        self._log_comm("SEQ_RESET", "Sequence state has been fully reset.")
+    # Helper methods
+    def _log_comm(self, prefix: str, message: str):
+        """Log communication."""
+        if self._llm_comm_logger:
+            self._llm_comm_logger.log_message(f"PACC:{prefix}", message)
 
-    def _extract_code_from_response(self, raw_response: str, filename: str) -> Optional[str]:
-        """
-        Enhanced code extraction with multiple fallback strategies.
+    def _emit_status(self, message: str, color: str, temporary: bool = False, duration: int = 0):
+        """Emit status update."""
+        self._event_bus.uiStatusUpdateGlobal.emit(message, color, temporary, duration)
 
-        Args:
-            raw_response: Raw response from Code LLM
-            filename: Target filename for context
+    def _emit_chat_message(self, message: str, is_error: bool = False):
+        """Emit chat message."""
+        project_id = self._project_context.get('project_id')
+        session_id = self._project_context.get('session_id')
 
-        Returns:
-            Extracted code or None if no valid code found
-        """
-        if not raw_response or not raw_response.strip():
-            logger.warning(f"PACC: Empty response received for {filename}")
-            return None
+        if project_id and session_id:
+            role = ERROR_ROLE if is_error else SYSTEM_ROLE
+            chat_msg = ChatMessage(role=role, parts=[message])
+            self._event_bus.newMessageAddedToHistory.emit(project_id, session_id, chat_msg)
 
-        # Strategy 1: Look for fenced code blocks with various patterns
-        fenced_patterns = [
-            r"```python\n(.*?)```",  # Standard python fenced block
-            r"```py\n(.*?)```",  # Short python fenced block
-            r"```\n(.*?)```",  # Generic fenced block
-            r"```[a-zA-Z]*\n(.*?)```",  # Any language fenced block
-            r"~~~python\n(.*?)~~~",  # Alternative fencing with tildes
-            r"~~~\n(.*?)~~~",  # Generic tilde fencing
-        ]
-
-        for pattern in fenced_patterns:
-            match = re.search(pattern, raw_response, re.DOTALL | re.IGNORECASE)
-            if match:
-                code = match.group(1).strip()
-                if self._is_valid_python_code(code, filename):
-                    logger.info(f"PACC: Found fenced code block for {filename} using pattern: {pattern}")
-                    return code
-
-        # Strategy 2: Look for code between common markers
-        marker_patterns = [
-            r"(?:Here\'s|Here is) the (?:complete )?code[^:]*:\s*\n(.*?)(?:\n\n|\Z)",
-            r"(?:Complete )?(?:Python )?[Cc]ode:\s*\n(.*?)(?:\n\n|\Z)",
-            r"(?:File|Implementation)(?: for [^:]+)?:\s*\n(.*?)(?:\n\n|\Z)",
-        ]
-
-        for pattern in marker_patterns:
-            match = re.search(pattern, raw_response, re.DOTALL | re.IGNORECASE)
-            if match:
-                code = match.group(1).strip()
-                if self._is_valid_python_code(code, filename):
-                    logger.info(f"PACC: Found marked code block for {filename}")
-                    return code
-
-        # Strategy 3: Look for the largest code-like block
-        lines = raw_response.split('\n')
-        code_lines = []
-        current_block = []
-        largest_block = []
-
-        for line in lines:
-            stripped_line = line.strip()
-
-            # Skip obvious non-code lines
-            if (stripped_line.startswith(('Here', 'The ', 'This ', 'I ', 'Let ', 'Note:', 'Please')) or
-                    '```' in stripped_line or
-                    stripped_line.endswith('?') or
-                    (stripped_line and not any(c in stripped_line for c in
-                                               ['=', '(', ')', '[', ']', '{', '}', ':', 'def ', 'class ', 'import ',
-                                                'from ']))):
-
-                if current_block and len(current_block) > len(largest_block):
-                    largest_block = current_block[:]
-                current_block = []
-                continue
-
-            # Collect potential code lines
-            if (stripped_line.startswith(('#', 'def ', 'class ', 'import ', 'from ', '@')) or
-                    any(keyword in stripped_line for keyword in
-                        ['=', 'return', 'if ', 'else:', 'elif ', 'for ', 'while ', 'try:', 'except', 'with ']) or
-                    (stripped_line and (stripped_line.startswith(' ') or stripped_line.startswith('\t')))):
-                current_block.append(line)
-            elif stripped_line:  # Non-empty line that might be code
-                current_block.append(line)
-
-        # Check the last block
-        if current_block and len(current_block) > len(largest_block):
-            largest_block = current_block[:]
-
-        if largest_block:
-            code = '\n'.join(largest_block).strip()
-            if self._is_valid_python_code(code, filename):
-                logger.info(f"PACC: Extracted largest code-like block for {filename}")
-                return code
-
-        # Strategy 4: Use entire response if it looks like pure code
-        if self._is_valid_python_code(raw_response.strip(), filename):
-            logger.info(f"PACC: Using entire response as code for {filename}")
-            return raw_response.strip()
-
-        logger.warning(f"PACC: Could not extract valid code for {filename} using any strategy")
-        return None
-
-    def _is_valid_python_code(self, code: str, filename: str) -> bool:
-        """
-        Check if the given string looks like valid Python code.
-
-        Args:
-            code: Code string to validate
-            filename: Filename for context
-
-        Returns:
-            True if code looks valid, False otherwise
-        """
-        if not code or len(code.strip()) < 10:
-            return False
-
-        # Must have some Python-like characteristics
-        python_indicators = [
-            'def ', 'class ', 'import ', 'from ',
-            'if __name__', 'return', '=', 'print(',
-            'try:', 'except', 'with ', 'for ', 'while ',
-            '#', '"""', "'''", 'self.', '__init__'
-        ]
-
-        # Count how many Python indicators are present
-        indicator_count = sum(1 for indicator in python_indicators if indicator in code)
-
-        # Need at least 2 indicators for short code, or 1 for longer code
-        min_indicators = 2 if len(code) < 100 else 1
-
-        if indicator_count < min_indicators:
-            logger.debug(
-                f"PACC: Code validation failed for {filename}: insufficient Python indicators ({indicator_count})")
-            return False
-
-        # Check for obvious non-code content
-        non_code_indicators = [
-            'Here is the', 'Here\'s the', 'The complete', 'This code',
-            'I hope this helps', 'Let me know', 'Please note',
-            'You can use', 'This should', 'Make sure to'
-        ]
-
-        code_lower = code.lower()
-        if any(indicator in code_lower for indicator in non_code_indicators):
-            # But allow if it's a small part of a larger code block
-            explanation_chars = sum(len(indicator) for indicator in non_code_indicators if indicator in code_lower)
-            if explanation_chars > len(code) * 0.1:  # More than 10% explanation text
-                logger.debug(f"PACC: Code validation failed for {filename}: too much explanatory text")
-                return False
-
-        # Try basic syntax validation
-        try:
-            import ast
-            ast.parse(code)
-            logger.debug(f"PACC: Code validation passed for {filename}: valid Python syntax")
-            return True
-        except SyntaxError:
-            # Might be a partial code block or have minor issues
-            # Check if it at least has proper indentation structure
-            lines = code.split('\n')
-            indented_lines = sum(1 for line in lines if line.startswith((' ', '\t')))
-
-            if indented_lines > 0:  # Has some indentation structure
-                logger.debug(
-                    f"PACC: Code validation passed for {filename}: has indentation structure despite syntax errors")
-                return True
-            else:
-                logger.debug(f"PACC: Code validation failed for {filename}: syntax error and no indentation")
-                return False
-        except Exception as e:
-            logger.debug(f"PACC: Code validation error for {filename}: {e}")
-            return False
-
-    # Also update the coder prompt construction to be more explicit
-    async def _generate_single_file_code_async(self, filename: str, instructions: str):
-        if not self._specialized_llm_backend_id or not self._specialized_llm_model_name:
-            logger.error("PACC: Specialized LLM details not set. Cannot generate code for {filename}.")
-            self._generated_code_map[filename] = (None, "Specialized LLM (Coder) not configured.")
-            self._emit_system_message_to_chat(f"[System Error: Code LLM not configured. Cannot generate `{filename}`.]",
-                                              is_error=True)
-            if not self._active_coder_request_ids and filename in self._parsed_files_list and self._parsed_files_list.index(
-                    filename) == len(self._parsed_files_list) - 1:
-                self._handle_all_coder_tasks_done()
-            return
-
-        coder_request_id = f"coder_req_{filename.replace('/', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
-        self._active_coder_request_ids[coder_request_id] = filename
-
-        self._log_comm("CODER_REQ", f"Requesting code for: {filename} (CoderReqID: {coder_request_id})")
-
-        # Add coder placeholder message
-        if self._current_project_id and self._current_session_id:
-            coder_placeholder_text = f"[System: Code LLM ({self._specialized_llm_model_name}) is generating code for `{filename}`... ⏳]"
-            coder_placeholder_msg = ChatMessage(
-                id=coder_request_id,
-                role=MODEL_ROLE,
-                parts=[coder_placeholder_text],
-                loading_state=MessageLoadingState.LOADING,
-                metadata={"purpose": "plan_and_code_coder_placeholder", "filename": filename,
-                          "pacc_request_id": coder_request_id}
-            )
-            self._event_bus.newMessageAddedToHistory.emit(
-                self._current_project_id,
-                self._current_session_id,
-                coder_placeholder_msg
-            )
-            self._log_comm("UI_MSG_ADD", f"Coder placeholder sent for {filename}, ReqID: {coder_request_id}")
-        else:
-            logger.warning(f"PACC: No P/S context, cannot send coder placeholder for {filename} to UI.")
-
-        # Create enhanced task-specific prompts
-        file_task_type = self._detect_file_task_type(filename, instructions)
-
-        # ENHANCED PROMPT WITH STRONGER CODE BLOCK REQUIREMENT
-        base_coder_prompt = f"""You are a Python code generation specialist. Generate COMPLETE, WORKING Python code for the file `{filename}`.
-
-    CRITICAL OUTPUT FORMAT REQUIREMENT:
-    - Respond with ONLY a single Python code block
-    - Use this EXACT format: ```python\\n[YOUR CODE HERE]\\n```
-    - NO explanatory text before or after the code block
-    - NO additional comments outside the code block
-
-    INSTRUCTIONS FOR {filename}:
-    {instructions}"""
-
-        # Add task-specific guidance
-        if file_task_type == 'api':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.API_DEVELOPMENT_PROMPT}"
-        elif file_task_type == 'data_processing':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.DATA_PROCESSING_PROMPT}"
-        elif file_task_type == 'ui':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.UI_DEVELOPMENT_PROMPT}"
-        elif file_task_type == 'utility':
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.UTILITY_DEVELOPMENT_PROMPT}"
-        else:
-            task_specific_guidance = f"\n\nTASK-SPECIFIC GUIDANCE:\n{constants.GENERAL_CODING_PROMPT}"
-
-        # Final reminder about format
-        format_reminder = """
-
-    REMINDER - EXACT OUTPUT FORMAT REQUIRED:
-    ```python
-    # Your complete Python code here
-    # Include all necessary imports
-    # Include all classes and functions
-    # Include proper error handling
-    # Include docstrings and type hints
-    ```
-
-    Do NOT include any text outside the code block. Respond ONLY with the fenced code block."""
-
-        coder_prompt_text = base_coder_prompt + task_specific_guidance + format_reminder
-        logger.info(f"PACC: Using {file_task_type} prompt for {filename}")
-
-        history_for_coder = [ChatMessage(role=USER_ROLE, parts=[coder_prompt_text])]
-
-        self._backend_coordinator.start_llm_streaming_task(
-            request_id=coder_request_id,
-            target_backend_id=self._specialized_llm_backend_id,
-            history_to_send=history_for_coder,
-            is_modification_response_expected=True,
-            options={"temperature": 0.2},
-            request_metadata={
-                "purpose": "plan_and_code_coder",
-                "pacc_request_id": coder_request_id,
-                "filename": filename,
-                "project_id": self._current_project_id,
-                "session_id": self._current_session_id
-            }
-        )
-        logger.info(f"PACC: Started code generation task for {filename} (ReqID: {coder_request_id})")
-
-    @Slot(str, ChatMessage, dict)  # type: ignore
-    def _handle_llm_responses(self, request_id: str, completed_message: ChatMessage, usage_stats_dict: dict):
-        purpose = usage_stats_dict.get("purpose")
-
-        logger.info(f"PACC: LLM Response RECVD. ReqID: {request_id}, Purpose: {purpose}")
-        self._log_comm("LLM_RESP",
-                       f"Purpose: {purpose}, ReqID: {request_id}, For Planner: {request_id == self._active_planning_request_id}, For Coder: {request_id in self._active_coder_request_ids}")
-
-        if purpose == "plan_and_code_planner" and request_id == self._active_planning_request_id:
-            logger.info(f"PACC: Received PLAN from Planner LLM (ReqID: {request_id})")
-            self._current_plan_text = completed_message.text  # type: ignore
-            self._log_comm("PLANNER_RECV", f"Plan text length {len(self._current_plan_text or '')} chars.")
-            self._active_planning_request_id = None  # Planner task is done
-
-            # Finalize the placeholder message for planner
-            self._emit_system_message_to_chat(
-                f"[System: Planner AI has provided a plan for '{self._original_user_query[:30]}...'. Parsing now...]",
-                request_id_ref=request_id)
-
-            if self._parse_planner_response(self._current_plan_text or ""):
-                if not self._parsed_files_list:
-                    msg_text = f"[System: Planner LLM indicates no files are needed for '{self._original_user_query[:50]}...']"
-                    self._emit_system_message_to_chat(msg_text)
-                    self._event_bus.uiStatusUpdateGlobal.emit("Planner indicates no files needed.", "#56b6c2", True,
-                                                              3000)
-                    self._event_bus.uiInputBarBusyStateChanged.emit(False)  # Release busy state
-                    self._reset_sequence_state()
-                else:
-                    files_str = ", ".join([f"`{f}`" for f in self._parsed_files_list])
-                    instructions_found_count = sum(1 for f in self._parsed_files_list if
-                                                   self._coder_instructions_map.get(
-                                                       f) and not self._coder_instructions_map.get(f, "").startswith(
-                                                       "[Error:"))
-                    all_instructions_ok = instructions_found_count == len(self._parsed_files_list)
-
-                    msg_text = f"[System: Plan parsed for '{self._original_user_query[:50]}...'. Files: {files_str}. Instructions OK: {instructions_found_count}/{len(self._parsed_files_list)}."
-                    if all_instructions_ok:
-                        msg_text += " Dispatching to Code LLM...]"
-                        self._emit_system_message_to_chat(msg_text)
-                        asyncio.create_task(self._dispatch_code_generation_tasks_async())
-                    else:
-                        msg_text += " Some instructions missing/invalid. Aborting code generation.]"
-                        self._emit_system_message_to_chat(msg_text, is_error=True)
-                        self._event_bus.uiStatusUpdateGlobal.emit("Plan parsed with errors. Code generation aborted.",
-                                                                  "#e06c75", False, 0)
-                        self._event_bus.uiInputBarBusyStateChanged.emit(False)  # Release busy state
-                        self._reset_sequence_state()
-            else:  # Parsing failed
-                err_msg_text = f"[System Error: Failed to parse the plan from Planner LLM for '{self._original_user_query[:50]}...'. Please check LLM logs or try rephrasing.]"
-                self._emit_system_message_to_chat(err_msg_text, is_error=True)
-                self._event_bus.uiStatusUpdateGlobal.emit("Failed to parse plan.", "#e06c75", False, 0)
-                self._event_bus.uiInputBarBusyStateChanged.emit(False)  # Release busy state
-                self._reset_sequence_state()
-
-        elif purpose == "plan_and_code_coder" and request_id in self._active_coder_request_ids:
-            filename = self._active_coder_request_ids.get(request_id, "unknown_file")
-            logger.info(f"PACC: Received CODE from Code LLM for file '{filename}' (ReqID: {request_id})")
-            self._log_comm("CODER_RECV", f"Code received for {filename}, ReqID: {request_id}")
-
-            raw_code_response = completed_message.text.strip() if completed_message.text else ""
-            logger.debug(
-                f"PACC: Raw code response for {filename} (length: {len(raw_code_response)} chars): '{raw_code_response[:200]}...'")
-
-            # 🔥 THIS IS THE KEY - USE THE NEW ENHANCED CODE EXTRACTION LOGIC
-            extracted_code = self._extract_code_from_response(raw_code_response, filename)
-
-            if extracted_code:
-                self._generated_code_map[filename] = (extracted_code, None)
-                logger.info(f"PACC: Successfully extracted code for {filename} ({len(extracted_code)} chars)")
-                self._log_comm("CODE_EXTRACT_OK", f"Extracted code for {filename}")
-                final_coder_msg_text = f"[System: Code LLM finished generating `{filename}`. Code extracted successfully.]"
-                self._emit_system_message_to_chat(final_coder_msg_text, is_error=False, request_id_ref=request_id)
-            else:
-                # Store the raw response with an error message
-                self._generated_code_map[filename] = (raw_code_response,
-                                                      "Warning: Could not extract clean code, using raw response.")
-                logger.warning(f"PACC: Could not extract clean code for '{filename}', storing raw response")
-                self._log_comm("CODE_EXTRACT_FALLBACK", f"Using raw response for {filename}")
-                final_coder_msg_text = f"[System: Code LLM finished generating `{filename}`. Using raw response (no clean code block found).]"
-                self._emit_system_message_to_chat(final_coder_msg_text, is_error=False, request_id_ref=request_id)
-
-            if request_id in self._active_coder_request_ids:
-                del self._active_coder_request_ids[request_id]
-            else:
-                logger.warning(
-                    f"PACC: Coder ReqID {request_id} for file {filename} was not in _active_coder_request_ids when trying to remove.")
-
-            logger.info(
-                f"PACC: Coder task for {filename} completed. Remaining active coder tasks: {len(self._active_coder_request_ids)}")
-            if not self._active_coder_request_ids:
-                logger.info("PACC: All coder tasks seem to be completed. Proceeding to _handle_all_coder_tasks_done.")
-                self._handle_all_coder_tasks_done()
-        else:
-            logger.debug(f"PACC: Ignoring LLM response for unrelated ReqID/Purpose: {request_id} / {purpose}")
-
-
-
-    @Slot(str, str)  # type: ignore
-    def _handle_llm_errors(self, request_id: str, error_message: str):
-        logger.error(f"PACC: LLM Error RECVD. ReqID: {request_id}, Error: {error_message}")
-        self._log_comm("LLM_ERROR", f"ReqID: {request_id}, Error: {error_message[:100]}...")
-
-        if request_id == self._active_planning_request_id:
-            logger.error(f"PACC: Error from Planner LLM (ReqID: {request_id}): {error_message}")
-            self._active_planning_request_id = None  # Planner task failed
-            error_msg_text = f"[System Error: Planner LLM failed to generate a plan for '{self._original_user_query[:50]}...': {error_message}]"
-            self._emit_system_message_to_chat(error_msg_text, is_error=True, request_id_ref=request_id)
-            self._event_bus.uiStatusUpdateGlobal.emit("Planner LLM error. Unable to create plan.", "#e06c75", False, 0)
-            self._event_bus.uiInputBarBusyStateChanged.emit(False)  # Release busy state
-            self._reset_sequence_state()
-
-        elif request_id in self._active_coder_request_ids:
-            filename = self._active_coder_request_ids.pop(request_id, "unknown_file_on_error")
-            logger.error(f"PACC: Error from Code LLM for file '{filename}' (ReqID: {request_id}): {error_message}")
-            self._generated_code_map[filename] = (None, error_message)  # Store error
-            error_msg_text = f"[System Error: Code LLM failed for file `{filename}`: {error_message}]"
-            self._emit_system_message_to_chat(error_msg_text, is_error=True, request_id_ref=request_id)
-
-            logger.info(
-                f"PACC: Coder task for {filename} errored. Remaining active coder tasks: {len(self._active_coder_request_ids)}")
-            if not self._active_coder_request_ids:  # Check if all coder tasks are now done (including this error)
-                logger.info(
-                    "PACC: All coder tasks seem to be completed (with errors). Proceeding to _handle_all_coder_tasks_done.")
-                self._handle_all_coder_tasks_done()
-        else:
-            logger.debug(f"PACC: Ignoring LLM error for unrelated ReqID: {request_id}")
+    def is_busy(self) -> bool:
+        """Check if coordinator is busy."""
+        return self._current_phase != SequencePhase.IDLE

@@ -145,8 +145,13 @@ class BackendCoordinator(QObject):
         """Get available models - return cached models immediately, fetch fresh in background"""
         cached_models = self._available_models_map.get(backend_id, [])
 
+        # 🔥 DEBUG LOGGING
+        logger.info(f"🐛 DEBUG: get_available_models_for_backend called for {backend_id}")
+        logger.info(f"🐛 DEBUG: Cached models for {backend_id}: {cached_models}")
+
         adapter = self._backend_adapters.get(backend_id)
         if not adapter:
+            logger.warning(f"🐛 DEBUG: No adapter found for {backend_id}")
             return cached_models
 
         import time
@@ -156,8 +161,23 @@ class BackendCoordinator(QObject):
                 current_time - self._models_fetch_cache[backend_id] > self._models_fetch_cooldown
         )
 
+        logger.info(f"🐛 DEBUG: Should refresh models for {backend_id}? {should_refresh}")
+        logger.info(f"🐛 DEBUG: Is configured: {self._is_configured_map.get(backend_id, False)}")
+
         if should_refresh and self._is_configured_map.get(backend_id, False):
+            logger.info(f"🐛 DEBUG: Scheduling async model fetch for {backend_id}")
             self._schedule_async_model_fetch(backend_id)
+
+        # 🔥 FORCE IMMEDIATE FETCH FOR DEBUGGING
+        if backend_id.startswith("ollama") and self._is_configured_map.get(backend_id, False):
+            logger.info(f"🐛 DEBUG: FORCE fetching models directly for {backend_id}")
+            try:
+                fresh_models = adapter.get_available_models()
+                logger.info(f"🐛 DEBUG: Fresh models from adapter: {fresh_models}")
+                self._available_models_map[backend_id] = fresh_models
+                return fresh_models
+            except Exception as e:
+                logger.error(f"🐛 DEBUG: Error in force fetch: {e}")
 
         return cached_models
 
