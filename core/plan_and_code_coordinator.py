@@ -195,21 +195,19 @@ class PlanAndCodeCoordinator(QObject):
             return False
 
     def _create_enhanced_planning_prompt(self) -> str:
-        """Create enhanced planning prompt specifically for multi-file projects."""
+        """FIXED: Create enhanced planning prompt that forces correct format."""
         task_guidance = self._get_task_specific_guidance()
 
-        return f"""You are an expert software architect specializing in multi-file Python projects. Create a detailed plan for implementing this request:
+        return f"""You are an expert software architect. You MUST create a plan in the EXACT format specified below.
 
 REQUEST: {self._original_query}
-
 PROJECT DIRECTORY: {self._project_context['project_dir']}
 TASK TYPE: {self._project_context.get('task_type', 'general')}
 
 {task_guidance}
 
-CRITICAL: For multi-file projects, you MUST specify dependencies clearly and order files by generation priority.
-
-Your response MUST follow this EXACT format:
+⚠️  CRITICAL FORMAT REQUIREMENTS ⚠️
+You MUST respond in this EXACT format. Do NOT deviate from this structure:
 
 ## Architecture Overview
 [Brief 2-3 sentence description of the approach and overall structure]
@@ -218,14 +216,14 @@ Your response MUST follow this EXACT format:
 [Explain the dependency relationships and why files should be generated in a specific order]
 
 ## Files Required
-FILES_LIST: ['file1.py', 'file2.py', 'file3.py', 'file4.py']
-GENERATION_ORDER: ['file1.py', 'file2.py', 'file3.py', 'file4.py']
+FILES_LIST: ['file1.py', 'file2.py', 'file3.py']
+GENERATION_ORDER: ['file1.py', 'file2.py', 'file3.py']
 
 ## Implementation Details
 
 ### file1.py
 PURPOSE: [What this file does and why it's generated first]
-DEPENDENCIES: [] 
+DEPENDENCIES: []
 DEPENDENTS: ['file2.py', 'file3.py']
 PRIORITY: 1
 REQUIREMENTS:
@@ -237,14 +235,22 @@ REQUIREMENTS:
 ### file2.py
 PURPOSE: [What this file does]
 DEPENDENCIES: ['file1.py']
-DEPENDENTS: ['file4.py']
+DEPENDENTS: ['file3.py']
 PRIORITY: 2
 REQUIREMENTS:
 - [Specific requirement 1]
 - [Must import from file1.py]
 - [Specific requirement 2]
 
-[Continue for each file with clear dependency chains...]
+### file3.py
+PURPOSE: [What this file does]
+DEPENDENCIES: ['file1.py', 'file2.py']
+DEPENDENTS: []
+PRIORITY: 3
+REQUIREMENTS:
+- [Specific requirement 1]
+- [Must import from file1.py and file2.py]
+- [Specific requirement 2]
 
 ## Error Handling Strategy
 [How errors should be handled consistently across all files]
@@ -252,14 +258,47 @@ REQUIREMENTS:
 ## Testing Strategy
 [How the generated code should be testable]
 
-CRITICAL REQUIREMENTS:
-1. FILES_LIST must be a valid Python list
-2. GENERATION_ORDER must show the correct sequence for dependencies
-3. Each file must specify DEPENDENCIES and DEPENDENTS clearly
-4. Priority numbers must be sequential (1, 2, 3, etc.)
-5. No circular dependencies allowed
-6. Base/utility files should have PRIORITY: 1
-7. Files that depend on others should have higher priority numbers"""
+🚨 MANDATORY FORMAT RULES 🚨
+1. FILES_LIST must be a valid Python list: ['file1.py', 'file2.py']
+2. GENERATION_ORDER must be a valid Python list: ['file1.py', 'file2.py']
+3. Each file MUST have a ### section with PURPOSE, DEPENDENCIES, DEPENDENTS, PRIORITY, REQUIREMENTS
+4. DEPENDENCIES must be a valid Python list: [] or ['file1.py']
+5. DEPENDENTS must be a valid Python list: [] or ['file2.py']
+6. PRIORITY must be a number: 1, 2, 3, etc.
+7. Use EXACTLY the section headers shown above (##, ###)
+8. Do NOT use formats like "FILES_TO_MODIFY:", "---CODER_INSTRUCTIONS_START---", etc.
+
+EXAMPLE for a single file project:
+
+## Architecture Overview
+Simple single-file Python script that organizes files by type.
+
+## File Dependencies & Generation Order
+Single file with no dependencies - can be generated immediately.
+
+## Files Required
+FILES_LIST: ['file_organizer.py']
+GENERATION_ORDER: ['file_organizer.py']
+
+## Implementation Details
+
+### file_organizer.py
+PURPOSE: Main script that organizes files in a directory by moving them into categorized subdirectories
+DEPENDENCIES: []
+DEPENDENTS: []
+PRIORITY: 1
+REQUIREMENTS:
+- Include command-line argument parsing with argparse
+- Create get_file_category() function to determine file type
+- Create organize_files() function to move files to appropriate subdirectories
+- Include comprehensive error handling for file operations
+- Add detailed docstrings and type hints throughout
+- Support common file extensions (images, documents, videos, etc.)
+- Create subdirectories automatically if they don't exist
+- Skip the script itself when organizing files
+- Print progress messages during file organization
+
+CRITICAL: Follow this format EXACTLY. Your response will be parsed by code that expects these exact section headers and list formats."""
 
     def _get_task_specific_guidance(self) -> str:
         """Enhanced guidance based on detected task type."""
