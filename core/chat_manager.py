@@ -1,4 +1,3 @@
-# core/chat_manager.py - Enhanced with optimized workflow and faster processing
 import asyncio
 import logging
 import os
@@ -38,7 +37,7 @@ logger = logging.getLogger(__name__)
 class ChatManager(QObject):
     def __init__(self, orchestrator, parent: Optional[QObject] = None):
         super().__init__(parent)
-        logger.info("ChatManager initializing with optimizations...")
+        logger.info("ChatManager initializing with project iteration support...")
 
         self._orchestrator = orchestrator
         self._event_bus = self._orchestrator.get_event_bus()
@@ -103,7 +102,7 @@ class ChatManager(QObject):
         self._event_bus.llmStreamChunkReceived.connect(self._handle_llm_stream_chunk)
 
         self._connect_event_bus_subscriptions()
-        logger.info("ChatManager initialized with optimizations.")
+        logger.info("ChatManager initialized with project iteration support.")
 
     def initialize(self):
         logger.info("ChatManager optimized initialization...")
@@ -391,6 +390,61 @@ class ChatManager(QObject):
         logger.debug(f"CM: Detected task type '{task_type}' for file '{filename}'")
         return self._get_specialized_prompt(task_type, user_text, filename)
 
+    # ✨ NEW: Project iteration support methods
+    def _create_project_iteration_prompt(self, user_text: str, project_context: Optional[str] = None) -> str:
+        """Create a specialized prompt for project iteration requests"""
+        base_prompt = f"""You are an expert software architect and developer helping to improve an existing codebase.
+
+PROJECT ITERATION REQUEST:
+{user_text}
+
+CURRENT PROJECT CONTEXT:
+{project_context or "No specific project context available - use RAG context below if provided."}
+
+CRITICAL INSTRUCTIONS:
+1. Analyze the existing code structure and patterns
+2. Provide specific, actionable improvements
+3. Maintain backward compatibility unless explicitly asked to break it
+4. Follow the existing code style and conventions
+5. Focus on the specific improvements requested
+6. If creating new files, output complete code in fenced blocks
+7. If modifying existing files, clearly indicate what changes to make
+
+RESPONSE FORMAT:
+- Provide analysis of current state
+- Suggest specific improvements
+- If creating files, use: ```python\\n[CODE]\\n```
+- If modifying files, clearly indicate changes needed
+
+Please analyze the request and provide thoughtful improvements to enhance the existing codebase."""
+
+        return base_prompt
+
+    def _get_project_context(self) -> Optional[str]:
+        """Get context about the current project for iteration requests"""
+        if not self._current_project_id:
+            return None
+
+        project = self._project_manager.get_project_by_id(self._current_project_id)
+        if not project:
+            return None
+
+        context_parts = [
+            f"Project: {project.name}",
+            f"Description: {project.description or 'No description available'}"
+        ]
+
+        # Add recent chat history context (last 3 messages for context)
+        if len(self._current_chat_history) > 0:
+            recent_messages = self._current_chat_history[-3:]
+            context_parts.append("\nRecent Conversation Context:")
+            for msg in recent_messages:
+                if msg.role in [USER_ROLE, MODEL_ROLE]:
+                    content_preview = msg.text[:200] + "..." if len(msg.text) > 200 else msg.text
+                    context_parts.append(f"- {msg.role.title()}: {content_preview}")
+
+        return "\n".join(context_parts)
+
     @Slot(str, str, bool, list)
     def _handle_backend_reconfigured_event(self, backend_id: str, model_name: str, is_configured: bool,
                                            available_models: list):
@@ -416,7 +470,7 @@ class ChatManager(QObject):
 
     @Slot(str, list)
     def handle_user_message(self, text: str, image_data: List[Dict[str, Any]]):
-        """Optimized user message handling with fast intent detection."""
+        """✨ ENHANCED: User message handling with project iteration support."""
         if not self._current_project_id or not self._current_session_id:
             self._emit_status_update("Error: No active project or session.", "#FF6B6B", True, 3000)
             return
@@ -433,7 +487,8 @@ class ChatManager(QObject):
 
         # Quick busy check
         if self._current_llm_request_id and processed_input.intent in [UserInputIntent.NORMAL_CHAT,
-                                                                       UserInputIntent.FILE_CREATION_REQUEST]:
+                                                                       UserInputIntent.FILE_CREATION_REQUEST,
+                                                                       UserInputIntent.PROJECT_ITERATION_REQUEST]:
             self._emit_status_update("Please wait for the current AI response.", "#e5c07b", True, 2500)
             return
 
@@ -447,13 +502,16 @@ class ChatManager(QObject):
         self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, user_message)
         self._log_llm_comm("USER", user_msg_txt)
 
-        # Route to appropriate handler
+        # ✨ ENHANCED: Route to appropriate handler with new iteration support
         if processed_input.intent == UserInputIntent.NORMAL_CHAT:
             asyncio.create_task(self._handle_normal_chat_async(user_msg_txt, image_data))
         elif processed_input.intent == UserInputIntent.FILE_CREATION_REQUEST:
             self._handle_file_creation_request(user_msg_txt, processed_input.data.get('filename'))
         elif processed_input.intent == UserInputIntent.PLAN_THEN_CODE_REQUEST:
             self._handle_plan_then_code_request(user_msg_txt)
+        elif processed_input.intent == UserInputIntent.PROJECT_ITERATION_REQUEST:
+            # ✨ NEW: Handle project iteration requests
+            asyncio.create_task(self._handle_project_iteration_request(user_msg_txt, image_data))
         else:
             unknown_intent_msg = ChatMessage(role=ERROR_ROLE,
                                              parts=[f"[System: Unknown request type: {user_msg_txt[:50]}...]"])
@@ -461,6 +519,93 @@ class ChatManager(QObject):
             if self._current_project_id and self._current_session_id:
                 self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                               unknown_intent_msg)
+
+    async def _handle_project_iteration_request(self, user_msg_txt: str, image_data: List[Dict[str, Any]]):
+        """✨ NEW: Handle requests to iterate/improve existing project code"""
+        self._event_bus.showLoader.emit("Analyzing project for improvements...")
+
+        if not self._is_chat_backend_configured:
+            err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=["[Error: Chat Backend not ready.]"])
+            self._current_chat_history.append(err_msg_obj)
+            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+                                                          err_msg_obj)
+            self._emit_status_update("Cannot iterate: Chat AI backend not configured.", "#FF6B6B")
+            self._event_bus.hideLoader.emit()
+            return
+
+        # Get project context
+        project_context = self._get_project_context()
+
+        # Create specialized iteration prompt
+        iteration_prompt = self._create_project_iteration_prompt(user_msg_txt, project_context)
+
+        history_for_llm = [ChatMessage(role=USER_ROLE, parts=[iteration_prompt])]
+
+        # Enhanced RAG for project iteration - we want MORE context for improvements
+        should_use_rag = (self._rag_handler and self._is_rag_ready and
+                          self._rag_handler.should_perform_rag(user_msg_txt, self._is_rag_ready, self._is_rag_ready))
+
+        if should_use_rag and self._rag_handler:
+            logger.info(f"CM: Performing enhanced RAG for iteration: '{user_msg_txt[:50]}'")
+            query_entities = self._rag_handler.extract_code_entities(user_msg_txt)
+
+            # Get MORE context for iteration requests (modification_request=True)
+            rag_context_str, queried_collections = self._rag_handler.get_formatted_context(
+                query=user_msg_txt,
+                query_entities=query_entities,
+                project_id=self._current_project_id,
+                explicit_focus_paths=[],
+                implicit_focus_paths=[],
+                is_modification_request=True  # ✨ This gets more context for iteration
+            )
+
+            if rag_context_str:
+                logger.info(f"CM: Enhanced RAG context found from collections: {queried_collections}")
+                rag_system_message = ChatMessage(role=SYSTEM_ROLE, parts=[rag_context_str],
+                                                 metadata={"is_rag_context": True,
+                                                           "queried_collections": queried_collections,
+                                                           "is_iteration_context": True})
+                history_for_llm.insert(-1, rag_system_message)
+
+                rag_notification_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE, parts=[
+                    f"[System: Enhanced project analysis with context from: {', '.join(queried_collections)}.]"],
+                                                   metadata={"is_internal": True})
+                self._current_chat_history.append(rag_notification_msg)
+                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+                                                              rag_notification_msg)
+                self._log_llm_comm("ITERATION_RAG",
+                                   rag_context_str[:200] + "..." if len(rag_context_str) > 200 else rag_context_str)
+
+        # Start LLM request with higher temperature for creativity in improvements
+        iteration_temperature = min(self._active_temperature + 0.2, 1.5)  # Slightly more creative
+
+        self._event_bus.updateLoaderMessage.emit(f"Analyzing with {self._active_chat_model_name}...")
+        success, err, req_id = self._backend_coordinator.initiate_llm_chat_request(self._active_chat_backend_id,
+                                                                                   history_for_llm, {
+                                                                                       "temperature": iteration_temperature})
+        if not success or not req_id:
+            err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[f"[Error in iteration: {err}]"])
+            self._current_chat_history.append(err_msg_obj)
+            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+                                                          err_msg_obj)
+            self._emit_status_update(f"Failed to start iteration analysis: {err or 'Unknown'}", "#FF6B6B")
+            self._event_bus.hideLoader.emit()
+            return
+
+        # Track request timing
+        import time
+        self._response_times[req_id] = time.time()
+
+        self._current_llm_request_id = req_id
+        placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""], loading_state=MessageLoadingState.LOADING)
+        self._current_chat_history.append(placeholder)
+        self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
+
+        self._backend_coordinator.start_llm_streaming_task(req_id, self._active_chat_backend_id, history_for_llm, False,
+                                                           {"temperature": iteration_temperature},
+                                                           {"purpose": "project_iteration",
+                                                            "project_id": self._current_project_id,
+                                                            "session_id": self._current_session_id})
 
     async def _handle_normal_chat_async(self, user_msg_txt: str, image_data: List[Dict[str, Any]]):
         """Optimized normal chat handling with faster RAG processing."""
@@ -827,7 +972,45 @@ class ChatManager(QObject):
                         self._event_bus.newMessageAddedToHistory.emit(
                             self._current_project_id, self._current_session_id, error_msg)
 
-                # Handle regular responses (non-file creation)
+                # ✨ NEW: Handle project iteration responses
+                elif purpose == "project_iteration":
+                    # Check if the response contains code that should be displayed in code viewer
+                    if "```" in completed_message_obj.text:
+                        # Try to extract any code blocks for display
+                        code_blocks = re.findall(r'```(?:python|py)?\s*\n(.*?)```',
+                                                 completed_message_obj.text, re.DOTALL | re.IGNORECASE)
+
+                        for i, code_block in enumerate(code_blocks):
+                            if code_block.strip():
+                                # Generate a filename for iteration code
+                                filename = f"iteration_improvement_{i + 1}.py"
+                                clean_code = self._code_processor.clean_and_format_code(code_block.strip())
+                                self._event_bus.modificationFileReadyForDisplay.emit(filename, clean_code)
+
+                                # Add notification about code being available
+                                code_ready_msg = ChatMessage(
+                                    id=uuid.uuid4().hex,
+                                    role=SYSTEM_ROLE,
+                                    parts=[f"[Improvement code available: {filename} - View in Code Viewer ✨]"],
+                                    metadata={"is_iteration_code": True, "filename": filename}
+                                )
+                                self._current_chat_history.append(code_ready_msg)
+                                self._event_bus.newMessageAddedToHistory.emit(
+                                    self._current_project_id, self._current_session_id, code_ready_msg)
+
+                    # Always update the message in history for project iteration
+                    updated = False
+                    for i, msg in enumerate(self._current_chat_history):
+                        if msg.id == request_id:
+                            self._current_chat_history[i] = completed_message_obj
+                            self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
+                            updated = True
+                            break
+
+                    if not updated:
+                        self._current_chat_history.append(completed_message_obj)
+
+                # Handle regular responses (normal chat)
                 else:
                     # Update the message in history
                     updated = False
@@ -855,7 +1038,13 @@ class ChatManager(QObject):
             # Clean up and update UI
             self._current_llm_request_id = None
             self._event_bus.uiInputBarBusyStateChanged.emit(False)
-            self._emit_status_update(f"Ready. Last: {self._active_chat_model_name}", "#98c379")
+
+            # ✨ Enhanced status messages
+            if purpose == "project_iteration":
+                self._emit_status_update(f"Project analysis complete. Using {self._active_chat_model_name}", "#98c379")
+            else:
+                self._emit_status_update(f"Ready. Last: {self._active_chat_model_name}", "#98c379")
+
             self._check_rag_readiness_and_emit_status()
 
     @Slot(str, str)
@@ -987,9 +1176,13 @@ class ChatManager(QObject):
                 self._handle_specialized_llm_selection_event(backend_id, model_name)
 
     def set_chat_temperature(self, temperature: float):
+        """✨ NEW: Set chat temperature with validation"""
         if 0.0 <= temperature <= 2.0:
             self._active_temperature = temperature
-            self._emit_status_update(f"Temp: {temperature:.2f}", "#61afef", True, 1500)
+            self._emit_status_update(f"Temperature: {temperature:.2f}", "#61afef", True, 2000)
+            logger.info(f"CM: Temperature set to {temperature:.2f}")
+        else:
+            logger.warning(f"CM: Invalid temperature {temperature}, must be 0.0-2.0")
 
     def get_current_chat_history(self) -> List[ChatMessage]:
         return self._current_chat_history

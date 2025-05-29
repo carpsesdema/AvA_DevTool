@@ -7,7 +7,7 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QSizePolicy,
     QComboBox, QGroupBox, QListWidget, QListWidgetItem, QHBoxLayout,
-    QInputDialog, QMessageBox, QFileDialog
+    QInputDialog, QMessageBox, QFileDialog, QSlider
 )
 
 try:
@@ -70,7 +70,7 @@ class LeftControlPanel(QWidget):
         self._load_initial_model_settings_phase1()
         self.load_initial_projects_and_sessions()
 
-        logger.info("LeftControlPanel initialized.")
+        logger.info("LeftControlPanel initialized with temperature control.")
 
     def _get_qta_icon(self, icon_name: str, color: str = "#00CFE8") -> QIcon:
         if QTAWESOME_AVAILABLE and qta:
@@ -111,6 +111,21 @@ class LeftControlPanel(QWidget):
         self.specialized_llm_combo_box.setObjectName("SpecializedLlmComboBox")
         self.specialized_llm_combo_box.setToolTip("Select the AI model for specialized tasks (e.g., code generation)")
         self.specialized_llm_combo_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # ✨ NEW: Temperature Control
+        self.temperature_label = QLabel("Temperature:")
+        self.temperature_label.setFont(self.button_font)
+
+        self.temperature_slider = QSlider(Qt.Orientation.Horizontal)
+        self.temperature_slider.setRange(0, 200)  # 0.0 to 2.0
+        self.temperature_slider.setValue(70)  # Default 0.7
+        self.temperature_slider.setToolTip("AI Creativity: 0.0 (focused) to 2.0 (creative)")
+        self.temperature_slider.setObjectName("TemperatureSlider")
+
+        self.temperature_value_label = QLabel("0.70")
+        self.temperature_value_label.setFont(QFont(constants.CHAT_FONT_FAMILY, constants.CHAT_FONT_SIZE - 2))
+        self.temperature_value_label.setStyleSheet("color: #61AFEF;")
+        self.temperature_value_label.setMinimumWidth(35)
 
         self.configure_ai_personality_button = QPushButton(" Configure Persona")
         self.configure_ai_personality_button.setFont(self.button_font)
@@ -219,6 +234,14 @@ class LeftControlPanel(QWidget):
         llm_config_layout.addWidget(self.chat_llm_combo_box)
         llm_config_layout.addWidget(self.specialized_llm_label)
         llm_config_layout.addWidget(self.specialized_llm_combo_box)
+
+        # ✨ NEW: Temperature slider layout
+        temp_layout = QHBoxLayout()
+        temp_layout.addWidget(self.temperature_label)
+        temp_layout.addWidget(self.temperature_slider)
+        temp_layout.addWidget(self.temperature_value_label)
+        llm_config_layout.addLayout(temp_layout)
+
         llm_config_layout.addWidget(self.configure_ai_personality_button)
         main_layout.addWidget(self.llm_config_group)
 
@@ -248,11 +271,26 @@ class LeftControlPanel(QWidget):
         self.chat_llm_combo_box.currentIndexChanged.connect(self._on_chat_llm_selected_phase1)
         self.specialized_llm_combo_box.currentIndexChanged.connect(self._on_specialized_llm_selected_phase1)
 
+        # ✨ NEW: Temperature slider connection
+        self.temperature_slider.valueChanged.connect(self._on_temperature_changed)
+
         self._event_bus.backendConfigurationChanged.connect(self._handle_backend_configuration_changed_event_phase1)
         self._event_bus.backendBusyStateChanged.connect(self._handle_backend_busy_state_changed_event_phase1)
         self.view_generated_code_button.clicked.connect(lambda: self._event_bus.viewCodeViewerRequested.emit())
 
         self.check_updates_button.clicked.connect(lambda: self._event_bus.checkForUpdatesRequested.emit())
+
+    # ✨ NEW: Temperature change handler
+    @Slot(int)
+    def _on_temperature_changed(self, value: int):
+        """Convert slider value (0-200) to temperature (0.0-2.0)"""
+        temperature = value / 100.0
+        self.temperature_value_label.setText(f"{temperature:.2f}")
+
+        if self.chat_manager:
+            self.chat_manager.set_chat_temperature(temperature)
+
+        logger.debug(f"Temperature changed to: {temperature}")
 
     def _connect_project_session_signals(self):
         self.new_project_button.clicked.connect(self._on_new_project_requested)
@@ -282,6 +320,13 @@ class LeftControlPanel(QWidget):
             self.update_sessions_list(current_project.id)
         else:
             self.sessions_list_widget.clear()
+
+        # ✨ Set initial temperature from ChatManager
+        if self.chat_manager:
+            current_temp = self.chat_manager.get_current_chat_temperature()
+            self.temperature_slider.setValue(int(current_temp * 100))
+            self.temperature_value_label.setText(f"{current_temp:.2f}")
+
         self.set_enabled_state(
             is_api_ready=self.chat_manager.is_api_ready(),
             is_busy=self.chat_manager.is_overall_busy(),
@@ -739,6 +784,7 @@ class LeftControlPanel(QWidget):
 
         self.chat_llm_combo_box.setEnabled(not is_busy)
         self.specialized_llm_combo_box.setEnabled(not is_busy)
+        self.temperature_slider.setEnabled(not is_busy)  # ✨ NEW: Temperature slider enabled state
         self.configure_ai_personality_button.setEnabled(effective_enabled_not_busy)
 
         self.new_chat_button.setEnabled(not is_busy and is_project_active)
@@ -756,3 +802,4 @@ class LeftControlPanel(QWidget):
         label_color = "#C0C0C0"
         self.chat_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")
         self.specialized_llm_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")
+        self.temperature_label.setStyleSheet(f"QLabel {{ color: {label_color}; }}")  # ✨ NEW

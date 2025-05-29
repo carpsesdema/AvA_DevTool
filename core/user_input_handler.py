@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 class UserInputIntent(Enum):
     NORMAL_CHAT = auto()
     PLAN_THEN_CODE_REQUEST = auto()
-    FILE_CREATION_REQUEST = auto()  # NEW
+    FILE_CREATION_REQUEST = auto()
+    PROJECT_ITERATION_REQUEST = auto()  # ✨ NEW: For iterating existing projects
     UNKNOWN = auto()
 
 
@@ -26,7 +27,36 @@ class ProcessedInput:
 
 class UserInputHandler:
     def __init__(self):
-        logger.info("UserInputHandler initialized with enhanced detection logic.")
+        logger.info("UserInputHandler initialized with enhanced detection logic and project iteration support.")
+
+        # ✨ NEW: Project iteration patterns
+        self.project_iteration_keywords = [
+            # Direct iteration commands
+            "improve this", "enhance this", "refactor this", "optimize this",
+            "update this", "modify this", "change this", "fix this",
+            "add to this", "extend this", "expand this",
+
+            # Project-specific iteration
+            "improve the project", "enhance the project", "refactor the project",
+            "update the project", "modify the project", "add feature to",
+            "improve existing", "enhance existing", "refactor existing",
+            "update existing", "modify existing",
+
+            # Code-specific iteration
+            "improve the code", "enhance the code", "refactor the code",
+            "optimize the code", "clean up the code", "fix the code",
+            "add functionality", "add feature", "implement feature",
+            "add method", "add function", "add class",
+
+            # Specific improvement requests
+            "make it better", "make it faster", "make it more efficient",
+            "add error handling", "add logging", "add tests",
+            "add documentation", "add comments", "add type hints",
+
+            # Architecture improvements
+            "restructure", "reorganize", "improve architecture",
+            "better structure", "cleaner code", "more modular"
+        ]
 
         # EXPANDED: More comprehensive keywords for plan-then-code
         self.plan_then_code_keywords = [
@@ -102,6 +132,34 @@ class UserInputHandler:
                 logger.info(f"UserInputHandler: Detected file creation intent for: {filename}")
                 return filename
         return None
+
+    def _is_project_iteration_request(self, user_text: str) -> bool:
+        """✨ NEW: Detect if this is a request to iterate/improve existing project"""
+        lower_text = user_text.lower()
+
+        # Check for iteration keywords
+        for keyword in self.project_iteration_keywords:
+            if keyword in lower_text:
+                logger.info(f"Found project iteration keyword '{keyword}' - routing to iteration")
+                return True
+
+        # Check for context words that suggest working with existing code
+        context_indicators = [
+            "this project", "this code", "this file", "this function", "this class",
+            "the current", "what we have", "existing code", "current implementation",
+            "our code", "our project", "our implementation", "our system",
+            "the code above", "the code below", "previous code", "last version"
+        ]
+
+        for indicator in context_indicators:
+            if indicator in lower_text:
+                # If context is mentioned with action words, it's likely iteration
+                action_words = ["improve", "fix", "change", "update", "modify", "enhance", "add"]
+                if any(action in lower_text for action in action_words):
+                    logger.info(f"Found context indicator '{indicator}' with action - routing to iteration")
+                    return True
+
+        return False
 
     def _is_plan_then_code_request(self, user_text: str) -> bool:
         """ENHANCED: Determine if this is a plan-then-code request"""
@@ -262,7 +320,7 @@ class UserInputHandler:
     def process_input(self, user_text: str, image_data: Optional[List[Dict[str, Any]]] = None) -> ProcessedInput:
         logger.info(f"UserInputHandler processing: '{user_text[:100]}...'")
 
-        # FIXED PRIORITY ORDER: This is the key fix for your issue
+        # ✨ ENHANCED PRIORITY ORDER: This is the key fix for your issue
 
         # 1. First, check for explicit filename creation
         detected_filename = self._detect_file_creation_intent(user_text)
@@ -280,7 +338,20 @@ class UserInputHandler:
                 original_query=user_text
             )
 
-        # 2. PRIORITY: Check for complex projects FIRST (this fixes your bug)
+        # 2. ✨ NEW: Check for project iteration requests (working with existing code)
+        elif self._is_project_iteration_request(user_text):
+            logger.info(f"✅ ROUTE: PROJECT_ITERATION_REQUEST - '{user_text[:50]}...'")
+            return ProcessedInput(
+                intent=UserInputIntent.PROJECT_ITERATION_REQUEST,
+                data={
+                    "user_text": user_text,
+                    "image_data": image_data or [],
+                    "iteration_type": "enhancement"  # Could be "enhancement", "refactor", "fix", etc.
+                },
+                original_query=user_text
+            )
+
+        # 3. PRIORITY: Check for complex projects FIRST (this fixes your bug)
         elif self._is_plan_then_code_request(user_text):
             logger.info(f"✅ ROUTE: PLAN_THEN_CODE_REQUEST - '{user_text[:50]}...'")
             return ProcessedInput(
@@ -289,7 +360,7 @@ class UserInputHandler:
                 original_query=user_text
             )
 
-        # 3. Simple single file request (only if not complex)
+        # 4. Simple single file request (only if not complex)
         elif self._is_single_file_request(user_text):
             logger.info(f"✅ ROUTE: FILE_CREATION_REQUEST (single file, no filename) - '{user_text[:50]}...'")
             return ProcessedInput(
@@ -302,7 +373,7 @@ class UserInputHandler:
                 original_query=user_text
             )
 
-        # 4. Default to normal chat
+        # 5. Default to normal chat
         logger.info(f"✅ ROUTE: NORMAL_CHAT - '{user_text[:50]}...'")
         return ProcessedInput(
             intent=UserInputIntent.NORMAL_CHAT,
@@ -316,6 +387,7 @@ class UserInputHandler:
             UserInputIntent.NORMAL_CHAT: "Normal conversation with the AI",
             UserInputIntent.PLAN_THEN_CODE_REQUEST: "Multi-file project generation with planning",
             UserInputIntent.FILE_CREATION_REQUEST: "Single file creation request",
+            UserInputIntent.PROJECT_ITERATION_REQUEST: "Improve or modify existing project/code",
             UserInputIntent.UNKNOWN: "Unknown or unrecognized request type"
         }
         return descriptions.get(intent, "Unknown intent type")
