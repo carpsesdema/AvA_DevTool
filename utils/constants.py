@@ -11,12 +11,12 @@ APP_NAME = "AvA: PySide6 Rebuild"
 APP_VERSION = "1.0.6"  # ✨ Version bump for new features
 
 DEFAULT_CHAT_BACKEND_ID = "gemini_chat_default"
-DEFAULT_GEMINI_CHAT_MODEL = "models/gemini-2.5-flash-preview-05-20"
-DEFAULT_OLLAMA_CHAT_MODEL = "devstral:24b" # Your preferred default
+DEFAULT_GEMINI_CHAT_MODEL = "gemini-2.5-pro-preview-05-06"
+DEFAULT_OLLAMA_CHAT_MODEL = "llama3:latest" # Your preferred default
 DEFAULT_GPT_CHAT_MODEL = "gpt-4.0" # Added default for GPT
 
 GENERATOR_BACKEND_ID = "ollama_generator_default"
-DEFAULT_OLLAMA_GENERATOR_MODEL = "qwen2.5-coder:32b" # Changed as requestedqwen2.5-coder:32b
+DEFAULT_OLLAMA_GENERATOR_MODEL = "wizardcoder:13b-python" # Changed as requestedqwen2.5-coder:32b
 
 API_DEVELOPMENT_PROMPT = """You are a backend API development specialist. Follow these guidelines:
 

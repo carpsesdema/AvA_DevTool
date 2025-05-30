@@ -1,9 +1,12 @@
+# core/chat_manager.py - Enhanced with project iteration and robust file handling
 import asyncio
 import logging
 import os
 import uuid
 import re
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
+from datetime import datetime # Ensure datetime is imported
+
 from core.code_output_processor import CodeOutputProcessor, CodeQualityLevel
 from PySide6.QtCore import QObject, Slot
 
@@ -20,14 +23,14 @@ try:
     from services.project_service import ProjectManager
     from services.upload_service import UploadService
     from core.rag_handler import RagHandler
-    from utils import constants
-    from config import get_gemini_api_key, get_openai_api_key
+    from utils import constants # Ensure constants is imported here
+    from config import get_gemini_api_key, get_openai_api_key # type: ignore
     from core.user_input_handler import UserInputHandler, UserInputIntent
     from core.plan_and_code_coordinator import PlanAndCodeCoordinator
 except ImportError as e:
-    ProjectManager = type("ProjectManager", (object,), {})
-    UploadService = type("UploadService", (object,), {})
-    RagHandler = type("RagHandler", (object,), {})
+    ProjectManager = type("ProjectManager", (object,), {}) # type: ignore
+    UploadService = type("UploadService", (object,), {}) # type: ignore
+    RagHandler = type("RagHandler", (object,), {}) # type: ignore
     logging.getLogger(__name__).critical(f"Critical import error in ChatManager: {e}", exc_info=True)
     raise
 
@@ -35,27 +38,27 @@ logger = logging.getLogger(__name__)
 
 
 class ChatManager(QObject):
-    def __init__(self, orchestrator, parent: Optional[QObject] = None):
+    def __init__(self, orchestrator: 'ApplicationOrchestrator', parent: Optional[QObject] = None):
         super().__init__(parent)
         logger.info("ChatManager initializing with project iteration support...")
 
-        self._orchestrator = orchestrator
-        self._event_bus = self._orchestrator.get_event_bus()
-        self._backend_coordinator = self._orchestrator.get_backend_coordinator()
-        self._llm_comm_logger = self._orchestrator.get_llm_communication_logger()
-        self._project_manager = self._orchestrator.get_project_manager()
+        self._orchestrator: 'ApplicationOrchestrator' = orchestrator
+        self._event_bus: EventBus = self._orchestrator.get_event_bus()
+        self._backend_coordinator: BackendCoordinator = self._orchestrator.get_backend_coordinator()
+        self._llm_comm_logger: Optional[LlmCommunicationLogger] = self._orchestrator.get_llm_communication_logger()
+        self._project_manager: ProjectManager = self._orchestrator.get_project_manager()
 
         # Optimized code processor
         self._code_processor = CodeOutputProcessor()
 
-        self._upload_service = self._orchestrator.get_upload_service()
-        self._rag_handler = self._orchestrator.get_rag_handler()
+        self._upload_service: Optional[UploadService] = self._orchestrator.get_upload_service()
+        self._rag_handler: Optional[RagHandler] = self._orchestrator.get_rag_handler()
 
         # Enhanced code streaming state with performance tracking
         self._active_code_streams: Dict[str, Dict[str, Any]] = {}
         # Structure: {request_id: {'block_id': str, 'is_streaming_code': bool, 'code_fence_count': int, 'start_time': float}}
 
-        if not isinstance(self._project_manager, ProjectManager):
+        if not isinstance(self._project_manager, ProjectManager): # type: ignore
             logger.critical("ChatManager received an invalid ProjectManager instance.")
             raise TypeError("ChatManager requires a valid ProjectManager instance from Orchestrator.")
 
@@ -78,7 +81,7 @@ class ChatManager(QObject):
         elif self._active_chat_backend_id == "gpt_chat_default":
             self._active_chat_model_name: str = constants.DEFAULT_GPT_CHAT_MODEL
         else:
-            self._active_chat_backend_id = "gemini_chat_default"
+            self._active_chat_backend_id = "gemini_chat_default" # Fallback to Gemini if not specified
             self._active_chat_model_name: str = constants.DEFAULT_GEMINI_CHAT_MODEL
 
         self._active_chat_personality_prompt: Optional[
@@ -307,7 +310,7 @@ class ChatManager(QObject):
                 api_key_to_use = None
 
             if backend_id in ["gemini_chat_default", "gpt_chat_default"] and not api_key_to_use:
-                err_msg = f"{backend_id.split('_')[0].upper()} API Key not found. Set in .env"
+                err_msg = f"{backend_id.split('_').upper()} API Key not found. Set in .env"
                 logger.error(err_msg)
                 if backend_id == self._active_chat_backend_id:
                     self._is_chat_backend_configured = False
@@ -495,7 +498,7 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         # Add user message to history
         user_msg_parts = [user_msg_txt] if user_msg_txt else []
         if image_data:
-            user_msg_parts.extend(image_data)
+            user_msg_parts.extend(image_data) # type: ignore
 
         user_message = ChatMessage(role=USER_ROLE, parts=user_msg_parts)
         self._current_chat_history.append(user_message)
@@ -527,7 +530,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         if not self._is_chat_backend_configured:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=["[Error: Chat Backend not ready.]"])
             self._current_chat_history.append(err_msg_obj)
-            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+            if self._current_project_id and self._current_session_id:
+                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update("Cannot iterate: Chat AI backend not configured.", "#FF6B6B")
             self._event_bus.hideLoader.emit()
@@ -565,13 +569,14 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
                                                  metadata={"is_rag_context": True,
                                                            "queried_collections": queried_collections,
                                                            "is_iteration_context": True})
-                history_for_llm.insert(-1, rag_system_message)
+                history_for_llm.insert(-1, rag_system_message) # type: ignore
 
                 rag_notification_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE, parts=[
                     f"[System: Enhanced project analysis with context from: {', '.join(queried_collections)}.]"],
                                                    metadata={"is_internal": True})
                 self._current_chat_history.append(rag_notification_msg)
-                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+                if self._current_project_id and self._current_session_id:
+                    self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                               rag_notification_msg)
                 self._log_llm_comm("ITERATION_RAG",
                                    rag_context_str[:200] + "..." if len(rag_context_str) > 200 else rag_context_str)
@@ -586,7 +591,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         if not success or not req_id:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[f"[Error in iteration: {err}]"])
             self._current_chat_history.append(err_msg_obj)
-            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+            if self._current_project_id and self._current_session_id:
+                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update(f"Failed to start iteration analysis: {err or 'Unknown'}", "#FF6B6B")
             self._event_bus.hideLoader.emit()
@@ -599,7 +605,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         self._current_llm_request_id = req_id
         placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""], loading_state=MessageLoadingState.LOADING)
         self._current_chat_history.append(placeholder)
-        self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
+        if self._current_project_id and self._current_session_id:
+            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
 
         self._backend_coordinator.start_llm_streaming_task(req_id, self._active_chat_backend_id, history_for_llm, False,
                                                            {"temperature": iteration_temperature},
@@ -614,7 +621,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         if not self._is_chat_backend_configured:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=["[Error: Chat Backend not ready.]"])
             self._current_chat_history.append(err_msg_obj)
-            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+            if self._current_project_id and self._current_session_id:
+                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update("Cannot send: Chat AI backend not configured.", "#FF6B6B")
             self._event_bus.hideLoader.emit()
@@ -630,9 +638,9 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
             self._event_bus.updateLoaderMessage.emit("Searching context...")
 
             # Fast RAG readiness check
-            if not self._upload_service._embedder_ready:
+            if not self._upload_service._embedder_ready: # type: ignore
                 self._emit_status_update("Waiting for RAG system...", "#e5c07b", False)
-                embedder_ready = await self._upload_service.wait_for_embedder_ready(
+                embedder_ready = await self._upload_service.wait_for_embedder_ready( # type: ignore
                     timeout_seconds=5.0)  # Reduced timeout
                 if not embedder_ready:
                     self._emit_status_update("RAG system not ready, continuing...", "#e5c07b", True, 2000)
@@ -651,13 +659,14 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
                 rag_system_message = ChatMessage(role=SYSTEM_ROLE, parts=[rag_context_str],
                                                  metadata={"is_rag_context": True,
                                                            "queried_collections": queried_collections})
-                history_for_llm.insert(-1, rag_system_message)
+                history_for_llm.insert(-1, rag_system_message) # type: ignore
 
                 rag_notification_msg = ChatMessage(id=uuid.uuid4().hex, role=SYSTEM_ROLE, parts=[
                     f"[System: RAG used. Context from: {', '.join(queried_collections)}.]"],
                                                    metadata={"is_internal": True})
                 self._current_chat_history.append(rag_notification_msg)
-                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+                if self._current_project_id and self._current_session_id:
+                    self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                               rag_notification_msg)
                 self._log_llm_comm("RAG Context",
                                    rag_context_str[:200] + "..." if len(rag_context_str) > 200 else rag_context_str)
@@ -670,7 +679,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         if not success or not req_id:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[f"[Error sending: {err}]"])
             self._current_chat_history.append(err_msg_obj)
-            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+            if self._current_project_id and self._current_session_id:
+                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update(f"Failed to start chat: {err or 'Unknown'}", "#FF6B6B")
             self._event_bus.hideLoader.emit()
@@ -683,7 +693,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         self._current_llm_request_id = req_id
         placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""], loading_state=MessageLoadingState.LOADING)
         self._current_chat_history.append(placeholder)
-        self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
+        if self._current_project_id and self._current_session_id:
+            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
 
         self._backend_coordinator.start_llm_streaming_task(req_id, self._active_chat_backend_id, history_for_llm, False,
                                                            {"temperature": self._active_temperature},
@@ -730,32 +741,32 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
             self._log_llm_comm("AUTONOMOUS_CODING_EXCEPTION", f"Exception: {e}")
 
     def _get_current_project_directory(self) -> str:
-        """Optimized project directory resolution."""
-        import os
-        from datetime import datetime
+        """Optimized project directory resolution, ensuring it's in USER_DATA_DIR."""
+        # import os # Already imported at top
+        # from datetime import datetime # Already imported at top
+        # from utils import constants # Already imported at top
 
-        # Check for user-defined projects directory first
-        user_projects_dir = getattr(self, '_user_projects_directory', None)
-        if user_projects_dir and os.path.exists(user_projects_dir):
-            return user_projects_dir
-
-        base_output_dir = os.path.join(os.getcwd(), "ava_generated_projects")
-
+        # Priority 1: If a current project is active, use its specific 'generated_files' directory
         if self._current_project_id and self._project_manager:
             project_obj = self._project_manager.get_project_by_id(self._current_project_id)
             if project_obj:
-                safe_project_name = "".join(
-                    c for c in project_obj.name if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')
-                project_output_dir = os.path.join(base_output_dir, safe_project_name)
-            else:
-                project_output_dir = os.path.join(base_output_dir, f"project_{self._current_project_id[:8]}")
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            project_output_dir = os.path.join(base_output_dir, f"untitled_project_{timestamp}")
+                # This correctly uses the project manager's isolated directory structure within USER_DATA_DIR
+                project_output_dir = self._project_manager.get_project_files_dir(self._current_project_id)
+                os.makedirs(project_output_dir, exist_ok=True)
+                logger.info(f"CM: Using active project directory for generation: {project_output_dir}")
+                return project_output_dir
+
+        # Priority 2: Fallback for when no specific project context is found
+        # Ensure this fallback is OUTSIDE the application's source code directory and INSIDE USER_DATA_DIR.
+        base_output_dir_for_no_context = os.path.join(constants.USER_DATA_DIR, "ava_generated_projects_no_context")
+        # Create a timestamped or default directory within this "no context" base
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        project_output_dir = os.path.join(base_output_dir_for_no_context, f"untitled_project_{timestamp}")
 
         os.makedirs(project_output_dir, exist_ok=True)
-        logger.info(f"CM: Using project directory: {project_output_dir}")
+        logger.info(f"CM: Using fallback project directory (no active project): {project_output_dir}")
         return project_output_dir
+
 
     def _extract_code_from_response(self, response_text: str, filename: str = "generated_file.py") -> Optional[str]:
         """Enhanced code extraction using optimized processor."""
@@ -868,7 +879,12 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
 
         rag_message: Optional[ChatMessage] = None
         try:
-            rag_message = self._upload_service.process_files_for_context(file_paths, collection_id=project_id)
+            if self._upload_service: # Check if upload_service is not None
+                rag_message = self._upload_service.process_files_for_context(file_paths, collection_id=project_id)
+            else:
+                logger.error("UploadService is None, cannot process files.")
+                rag_message = ChatMessage(role=ERROR_ROLE, parts=["[System Error: Upload service not available]"])
+
         finally:
             self._event_bus.hideLoader.emit()
 
@@ -924,17 +940,17 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         if request_id == self._current_llm_request_id and meta_pid == self._current_project_id and meta_sid == self._current_session_id:
             self._event_bus.hideLoader.emit()
 
-            if isinstance(completed_message_obj, ChatMessage):
+            if isinstance(completed_message_obj, ChatMessage): # type: ignore
                 self._log_llm_comm(self._active_chat_backend_id.upper() + " RESPONSE",
-                                   completed_message_obj.text[:200] + "..." if len(
-                                       completed_message_obj.text) > 200 else completed_message_obj.text)
+                                   completed_message_obj.text[:200] + "..." if len( # type: ignore
+                                       completed_message_obj.text) > 200 else completed_message_obj.text) # type: ignore
 
                 # Handle file creation with optimized code extraction
                 if purpose in ["file_creation",
                                "enhanced_file_creation"] and request_id in self._file_creation_request_ids:
                     filename = self._file_creation_request_ids.pop(request_id)
 
-                    extracted_code = self._extract_code_from_response(completed_message_obj.text, filename)
+                    extracted_code = self._extract_code_from_response(completed_message_obj.text, filename) # type: ignore
 
                     if extracted_code:
                         logger.info(f"CM: Successfully extracted code for file '{filename}', sending to code viewer")
@@ -949,14 +965,15 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
                             metadata={"is_file_creation": True, "filename": filename}
                         )
                         self._current_chat_history.append(file_creation_msg)
-                        self._event_bus.newMessageAddedToHistory.emit(
-                            self._current_project_id, self._current_session_id, file_creation_msg)
+                        if self._current_project_id and self._current_session_id:
+                             self._event_bus.newMessageAddedToHistory.emit(
+                                self._current_project_id, self._current_session_id, file_creation_msg)
                     else:
                         logger.warning(f"CM: Could not extract code from response for file '{filename}'")
 
                         try:
                             suggestions = self._code_processor.suggest_fixes_for_poor_code(
-                                completed_message_obj.text, filename
+                                completed_message_obj.text, filename # type: ignore
                             )
                             suggestion_text = f"Code extraction failed for {filename}. Suggestions: {'; '.join(suggestions)}"
                         except:
@@ -969,16 +986,17 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
                             metadata={"is_extraction_error": True, "filename": filename}
                         )
                         self._current_chat_history.append(error_msg)
-                        self._event_bus.newMessageAddedToHistory.emit(
-                            self._current_project_id, self._current_session_id, error_msg)
+                        if self._current_project_id and self._current_session_id:
+                            self._event_bus.newMessageAddedToHistory.emit(
+                                self._current_project_id, self._current_session_id, error_msg)
 
                 # ✨ NEW: Handle project iteration responses
                 elif purpose == "project_iteration":
                     # Check if the response contains code that should be displayed in code viewer
-                    if "```" in completed_message_obj.text:
+                    if "```" in completed_message_obj.text: # type: ignore
                         # Try to extract any code blocks for display
                         code_blocks = re.findall(r'```(?:python|py)?\s*\n(.*?)```',
-                                                 completed_message_obj.text, re.DOTALL | re.IGNORECASE)
+                                                 completed_message_obj.text, re.DOTALL | re.IGNORECASE) # type: ignore
 
                         for i, code_block in enumerate(code_blocks):
                             if code_block.strip():
@@ -995,20 +1013,21 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
                                     metadata={"is_iteration_code": True, "filename": filename}
                                 )
                                 self._current_chat_history.append(code_ready_msg)
-                                self._event_bus.newMessageAddedToHistory.emit(
-                                    self._current_project_id, self._current_session_id, code_ready_msg)
+                                if self._current_project_id and self._current_session_id:
+                                    self._event_bus.newMessageAddedToHistory.emit(
+                                        self._current_project_id, self._current_session_id, code_ready_msg)
 
                     # Always update the message in history for project iteration
                     updated = False
                     for i, msg in enumerate(self._current_chat_history):
                         if msg.id == request_id:
-                            self._current_chat_history[i] = completed_message_obj
+                            self._current_chat_history[i] = completed_message_obj # type: ignore
                             self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
                             updated = True
                             break
 
                     if not updated:
-                        self._current_chat_history.append(completed_message_obj)
+                        self._current_chat_history.append(completed_message_obj) # type: ignore
 
                 # Handle regular responses (normal chat)
                 else:
@@ -1016,13 +1035,13 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
                     updated = False
                     for i, msg in enumerate(self._current_chat_history):
                         if msg.id == request_id:
-                            self._current_chat_history[i] = completed_message_obj
+                            self._current_chat_history[i] = completed_message_obj # type: ignore
                             self._current_chat_history[i].loading_state = MessageLoadingState.COMPLETED
                             updated = True
                             break
 
                     if not updated:
-                        self._current_chat_history.append(completed_message_obj)
+                        self._current_chat_history.append(completed_message_obj) # type: ignore
 
                 # Emit finalization signal
                 if self._current_project_id and self._current_session_id:
@@ -1110,7 +1129,7 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
     def _check_rag_readiness_and_emit_status(self):
         """Optimized RAG status checking."""
         if not self._upload_service or not hasattr(self._upload_service,
-                                                   '_vector_db_service') or not self._upload_service._vector_db_service:
+                                                   '_vector_db_service') or not self._upload_service._vector_db_service: # type: ignore
             self._is_rag_ready = False
             self._event_bus.ragStatusChanged.emit(False, "RAG Not Ready (Service Error)", "#e06c75")
             return
@@ -1119,15 +1138,15 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         rag_status_color = constants.TIMESTAMP_COLOR_HEX
         current_context_rag_ready = False
 
-        if not self._upload_service._embedder_ready:
+        if not self._upload_service._embedder_ready: # type: ignore
             rag_status_message = "RAG: Initializing embedder..."
             rag_status_color = "#e5c07b"
         elif not self._current_project_id:
-            if not self._upload_service._dependencies_ready:
+            if not self._upload_service._dependencies_ready: # type: ignore
                 rag_status_message = "Global RAG: Dependencies Missing"
                 rag_status_color = "#e06c75"
             else:
-                global_size = self._upload_service._vector_db_service.get_collection_size(
+                global_size = self._upload_service._vector_db_service.get_collection_size( # type: ignore
                     constants.GLOBAL_COLLECTION_ID)
                 if global_size == -1:
                     rag_status_message = "Global RAG: DB Error"
@@ -1145,11 +1164,11 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
             project_display_name = project_name_display.name[:15] if project_name_display else self._current_project_id[
                                                                                                :8]
 
-            if not self._upload_service._dependencies_ready:
+            if not self._upload_service._dependencies_ready: # type: ignore
                 rag_status_message = f"RAG for '{project_display_name}...': Dependencies Missing"
                 rag_status_color = "#e06c75"
             else:
-                project_size = self._upload_service._vector_db_service.get_collection_size(self._current_project_id)
+                project_size = self._upload_service._vector_db_service.get_collection_size(self._current_project_id) # type: ignore
                 if project_size == -1:
                     rag_status_message = f"RAG for '{project_display_name}...': DB Error"
                     rag_status_color = "#e06c75"
@@ -1245,13 +1264,13 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
     def get_backend_coordinator(self) -> BackendCoordinator:
         return self._backend_coordinator
 
-    def get_project_manager(self) -> ProjectManager:
+    def get_project_manager(self) -> ProjectManager: # type: ignore
         return self._project_manager
 
-    def get_upload_service(self) -> Optional[UploadService]:
+    def get_upload_service(self) -> Optional[UploadService]: # type: ignore
         return self._upload_service
 
-    def get_rag_handler(self) -> Optional[RagHandler]:
+    def get_rag_handler(self) -> Optional[RagHandler]: # type: ignore
         return self._rag_handler
 
     def cleanup_phase1(self):
@@ -1291,7 +1310,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         if not success or not req_id:
             err_msg_obj = ChatMessage(id=uuid.uuid4().hex, role=ERROR_ROLE, parts=[f"[Error creating file: {err}]"])
             self._current_chat_history.append(err_msg_obj)
-            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
+            if self._current_project_id and self._current_session_id:
+                self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id,
                                                           err_msg_obj)
             self._emit_status_update(f"Failed to start file creation: {err or 'Unknown'}", "#FF6B6B")
             self._event_bus.hideLoader.emit()
@@ -1305,7 +1325,8 @@ Please analyze the request and provide thoughtful improvements to enhance the ex
         self._current_llm_request_id = req_id
         placeholder = ChatMessage(id=req_id, role=MODEL_ROLE, parts=[""], loading_state=MessageLoadingState.LOADING)
         self._current_chat_history.append(placeholder)
-        self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
+        if self._current_project_id and self._current_session_id:
+            self._event_bus.newMessageAddedToHistory.emit(self._current_project_id, self._current_session_id, placeholder)
 
         self._backend_coordinator.start_llm_streaming_task(req_id, self._active_chat_backend_id, history_for_llm, False,
                                                            {"temperature": 0.2},

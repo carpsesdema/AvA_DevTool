@@ -1,6 +1,7 @@
 # core/application_orchestrator.py
 import logging
 from typing import Dict, Optional, Any, List, TYPE_CHECKING
+import os # Ensure os is imported for path operations
 
 from PySide6.QtCore import QObject, Slot
 
@@ -8,6 +9,17 @@ from PySide6.QtCore import QObject, Slot
 if TYPE_CHECKING:
     from core.chat_manager import ChatManager
     from backends.backend_interface import BackendInterface # Keep for type hinting if needed
+    # Ensure other type hints are correctly resolvable or forward referenced
+    from services.project_service import ProjectManager, Project, ChatSession
+    from core.event_bus import EventBus
+    from backends.backend_coordinator import BackendCoordinator
+    from services.llm_communication_logger import LlmCommunicationLogger
+    from services.upload_service import UploadService
+    from services.terminal_service import TerminalService
+    from services.update_service import UpdateService
+    from core.rag_handler import RagHandler
+    from core.models import ChatMessage
+
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +47,7 @@ class ApplicationOrchestrator(QObject):
         from core.models import ChatMessage
         # from ui.dialogs.code_viewer_dialog import CodeViewerWindow # Keep commented if not directly used by orchestrator
 
-        self.event_bus = EventBus.get_instance()
+        self.event_bus: 'EventBus' = EventBus.get_instance()
         if self.event_bus is None:
             logger.critical("EventBus instance is None in ApplicationOrchestrator.")
             raise RuntimeError("EventBus could not be instantiated.")
@@ -79,7 +91,7 @@ class ApplicationOrchestrator(QObject):
             self._all_backend_adapters_dict[constants.GENERATOR_BACKEND_ID] = self.ollama_generator_adapter
 
         try:
-            self.backend_coordinator = BackendCoordinator(self._all_backend_adapters_dict, parent=self)
+            self.backend_coordinator: 'BackendCoordinator' = BackendCoordinator(self._all_backend_adapters_dict, parent=self)
         except ValueError as ve:
             logger.critical(f"Failed to instantiate BackendCoordinator: {ve}", exc_info=True)
             raise
@@ -87,8 +99,8 @@ class ApplicationOrchestrator(QObject):
             logger.critical(f"An unexpected error occurred instantiating BackendCoordinator: {e_bc}", exc_info=True)
             raise
 
-        self.upload_service: Optional[UploadService] = None
-        self.rag_handler: Optional[RagHandler] = None
+        self.upload_service: Optional['UploadService'] = None
+        self.rag_handler: Optional['RagHandler'] = None
         try:
             self.upload_service = UploadService()
             vector_db_service = getattr(self.upload_service, '_vector_db_service',
@@ -101,7 +113,7 @@ class ApplicationOrchestrator(QObject):
             self.upload_service = None
             self.rag_handler = None
 
-        self.terminal_service: Optional[TerminalService] = None
+        self.terminal_service: Optional['TerminalService'] = None
         try:
             self.terminal_service = TerminalService(parent=self)
             logger.info("TerminalService initialized successfully")
@@ -111,7 +123,7 @@ class ApplicationOrchestrator(QObject):
                 exc_info=True)
             self.terminal_service = None
 
-        self.update_service: Optional[UpdateService] = None
+        self.update_service: Optional['UpdateService'] = None
         try:
             self.update_service = UpdateService(parent=self)
             logger.info("UpdateService initialized successfully")
@@ -120,7 +132,7 @@ class ApplicationOrchestrator(QObject):
                          exc_info=True)
             self.update_service = None
 
-        self.llm_communication_logger: Optional[LlmCommunicationLogger] = None
+        self.llm_communication_logger: Optional['LlmCommunicationLogger'] = None
         try:
             self.llm_communication_logger = LlmCommunicationLogger(parent=self)
         except Exception as e_logger:
@@ -176,7 +188,7 @@ class ApplicationOrchestrator(QObject):
     @Slot(str, str, str, str)
     def _handle_apply_file_change_requested(self, project_id: str, relative_filepath: str, new_content: str,
                                             focus_prefix: str):
-        import os
+        # import os # Already imported at top level
         try:
             if focus_prefix and os.path.isabs(focus_prefix) and os.path.isdir(
                     os.path.dirname(os.path.join(focus_prefix, relative_filepath))):
@@ -200,20 +212,28 @@ class ApplicationOrchestrator(QObject):
             self.event_bus.uiErrorGlobal.emit(f"Failed to save file: {str(e)}", False)
 
     def _get_current_project_directory(self, project_id_context: Optional[str] = None) -> str:
-        import os
+        # import os # Already imported at top level
+        from utils import constants # Ensure constants is available for USER_DATA_DIR
+
         target_project_id = project_id_context
         if not target_project_id and self.chat_manager:
             target_project_id = self.chat_manager.get_current_project_id()
 
         if target_project_id and self.project_manager:
+            # This correctly uses the project manager's isolated directory structure
             return self.project_manager.get_project_files_dir(target_project_id)
 
-        default_base = os.path.join(os.getcwd(), "ava_generated_projects")
-        default_project_dir_name = "default_project_output"
-        fallback_dir = os.path.join(default_base, default_project_dir_name)
+        # Fallback for when no specific project context is found (e.g., before first project creation)
+        # Ensure this fallback is OUTSIDE the application's source code directory.
+        # Use constants.USER_DATA_DIR as the base for user-generated content.
+        default_base_for_user_content = os.path.join(constants.USER_DATA_DIR, "ava_generated_projects_no_context")
+        default_project_dir_name = "default_output" # Standardized fallback dir name
+        fallback_dir = os.path.join(default_base_for_user_content, default_project_dir_name)
+
         os.makedirs(fallback_dir, exist_ok=True)
         logger.warning(
-            f"Orchestrator._get_current_project_directory: No specific project context, using fallback: {fallback_dir}")
+            f"Orchestrator._get_current_project_directory: No specific project context, using fallback: {fallback_dir}"
+        )
         return fallback_dir
 
     def initialize_application_state(self):
@@ -238,7 +258,9 @@ class ApplicationOrchestrator(QObject):
                 active_project = projects[0]
                 self.project_manager.switch_to_project(active_project.id)
             else:
+                # Ensure project is switched to, even if it was already "current" but session might be stale
                 self.project_manager.switch_to_project(active_project.id)
+
 
             active_session = self.project_manager.get_current_session()
             if not active_session and active_project:
@@ -352,32 +374,32 @@ class ApplicationOrchestrator(QObject):
                 f"Orchestrator: Active project {deleted_project_id} was deleted. Initializing new default state.")
             self.initialize_application_state()
 
-    def get_event_bus(self) -> 'EventBus':
+    def get_event_bus(self) -> 'EventBus': # type: ignore
         return self.event_bus
 
-    def get_backend_coordinator(self) -> 'BackendCoordinator':
+    def get_backend_coordinator(self) -> 'BackendCoordinator': # type: ignore
         if not hasattr(self, 'backend_coordinator') or self.backend_coordinator is None:
             logger.critical("BackendCoordinator accessed before proper initialization in Orchestrator.")
             raise AttributeError("BackendCoordinator not initialized.")
         return self.backend_coordinator
 
-    def get_llm_communication_logger(self) -> Optional['LlmCommunicationLogger']:
+    def get_llm_communication_logger(self) -> Optional['LlmCommunicationLogger']: # type: ignore
         return self.llm_communication_logger
 
-    def get_all_backend_adapters_dict(self) -> Dict[str, 'BackendInterface']:
+    def get_all_backend_adapters_dict(self) -> Dict[str, 'BackendInterface']: # type: ignore
         return self._all_backend_adapters_dict
 
-    def get_project_manager(self) -> 'ProjectManager':
+    def get_project_manager(self) -> 'ProjectManager': # type: ignore
         return self.project_manager
 
-    def get_upload_service(self) -> Optional['UploadService']:
+    def get_upload_service(self) -> Optional['UploadService']: # type: ignore
         return self.upload_service
 
-    def get_rag_handler(self) -> Optional['RagHandler']:
+    def get_rag_handler(self) -> Optional['RagHandler']: # type: ignore
         return self.rag_handler
 
-    def get_terminal_service(self) -> Optional['TerminalService']:
+    def get_terminal_service(self) -> Optional['TerminalService']: # type: ignore
         return self.terminal_service
 
-    def get_update_service(self) -> Optional['UpdateService']:
+    def get_update_service(self) -> Optional['UpdateService']: # type: ignore
         return self.update_service
