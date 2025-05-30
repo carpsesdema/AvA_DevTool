@@ -1,4 +1,4 @@
-# core/event_bus.py
+# core/event_bus.py - Enhanced with Multi-Project IDE Signals
 import logging
 from typing import Optional
 from PySide6.QtCore import QObject, Signal
@@ -75,6 +75,27 @@ class EventBus(QObject):
     # Code Generation / Modification Flow
     modificationFileReadyForDisplay = Signal(str, str) # filename, content
     applyFileChangeRequested = Signal(str, str, str, str) # project_id, relative_filepath, new_content, focus_prefix
+
+    # NEW: Multi-Project IDE Signals
+    # Project-File Integration Signals
+    projectFilesSaved = Signal(str, str, str)  # project_id, file_path, content
+    projectLoaded = Signal(str, str)  # project_id, project_path
+    projectUnloaded = Signal(str)  # project_id
+    focusSetOnFiles = Signal(str, list)  # project_id, file_paths_list
+
+    # Code Viewer IDE Signals
+    codeViewerProjectLoaded = Signal(str, str, str)  # project_name, project_path, project_id
+    codeViewerFileSaved = Signal(str, str, str)  # project_id, file_path, content
+    codeViewerFocusRequested = Signal(str, list)  # project_id, file_paths
+
+    # RAG Sync Signals (enhanced)
+    ragProjectSyncRequested = Signal(str, str, str)  # project_id, file_path, content
+    ragProjectSyncCompleted = Signal(str, str, bool)  # project_id, file_path, success
+    ragProjectInitializationRequested = Signal(str, str)  # project_id, project_path
+
+    # File System Integration
+    fileSystemWatchRequested = Signal(str, str)  # project_id, project_path
+    fileSystemChangeDetected = Signal(str, str, str)  # project_id, file_path, change_type
 
     # Update System Signals
     checkForUpdatesRequested = Signal()

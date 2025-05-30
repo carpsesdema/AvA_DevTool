@@ -1,4 +1,4 @@
-# ui/dialog_service.py - Fixed version with better code viewer management
+# ui/dialog_service.py - Complete Enhanced Version
 import logging
 from typing import Optional
 
@@ -41,10 +41,10 @@ class DialogService(QObject):
         self._llm_terminal_window: Optional[LlmTerminalWindow] = None
         self._code_viewer_window: Optional[CodeViewerWindow] = None
         self._project_rag_dialog: Optional[ProjectRagDialog] = None
-        self._update_dialog: Optional[UpdateDialog] = None  # NEW: Add update dialog instance
+        self._update_dialog: Optional[UpdateDialog] = None
 
         self._connect_event_bus_subscriptions_phase1()
-        logger.info("DialogService (Phase 1) initialized and connected to EventBus.")
+        logger.info("DialogService (Enhanced) initialized and connected to EventBus.")
 
     def _connect_event_bus_subscriptions_phase1(self):
         bus = self._event_bus
@@ -53,10 +53,15 @@ class DialogService(QObject):
         bus.viewCodeViewerRequested.connect(lambda: self.show_code_viewer(ensure_creation=True))
         bus.showProjectRagDialogRequested.connect(self.trigger_show_project_rag_dialog)
 
-        # NEW: Connect update-related signals
+        # Update-related signals
         bus.updateAvailable.connect(self.show_update_dialog)
         bus.noUpdateAvailable.connect(self._handle_no_update_available)
         bus.updateCheckFailed.connect(self._handle_update_check_failed)
+
+        # NEW: Connect enhanced CodeViewer signals
+        bus.codeViewerProjectLoaded.connect(self._handle_code_viewer_project_loaded)
+        bus.projectFilesSaved.connect(self._handle_project_file_saved_in_viewer)
+        bus.focusSetOnFiles.connect(self._handle_focus_set_from_viewer)
 
     def show_llm_terminal_window(self, ensure_creation: bool = True) -> Optional[LlmTerminalWindow]:
         logger.debug(f"DialogService: Request to show LLM terminal window (ensure_creation={ensure_creation}).")
@@ -101,34 +106,49 @@ class DialogService(QObject):
             return None
 
     def show_code_viewer(self, ensure_creation: bool = True) -> Optional[CodeViewerWindow]:
-        logger.debug(f"DialogService: Request to show Code Viewer (ensure_creation={ensure_creation}).")
+        """Enhanced version that supports multi-project IDE"""
+        logger.debug(f"DialogService: Request to show Enhanced Code Viewer (ensure_creation={ensure_creation}).")
         try:
             if self._code_viewer_window is None and ensure_creation:
-                self._code_viewer_window = CodeViewerWindow(parent=self.parent_window)  # Parent is main window
-                logger.info("DialogService: Created new CodeViewerWindow instance.")
+                # Import the enhanced version
+                from ui.dialogs.code_viewer_dialog import CodeViewerWindow
+                self._code_viewer_window = CodeViewerWindow(parent=self.parent_window)
+                logger.info("DialogService: Created new Enhanced CodeViewerWindow instance.")
 
-                # Connect the apply change signal
+                # Connect enhanced signals
                 if hasattr(self._code_viewer_window, 'apply_change_requested'):
                     self._code_viewer_window.apply_change_requested.connect(
                         lambda proj_id, rel_fp, content, focus_p:
                         self._event_bus.applyFileChangeRequested.emit(proj_id, rel_fp, content, focus_p)
                     )
-                    logger.info("DialogService: Connected CodeViewerWindow.apply_change_requested to EventBus.")
-                else:
-                    logger.warning(
-                        "DialogService: CodeViewerWindow instance does not have 'apply_change_requested' signal.")
+                    logger.info("DialogService: Connected apply_change_requested to EventBus.")
+
+                # NEW: Connect multi-project signals
+                if hasattr(self._code_viewer_window, 'projectFilesSaved'):
+                    self._code_viewer_window.projectFilesSaved.connect(
+                        lambda proj_id, file_path, content:
+                        self._event_bus.projectFilesSaved.emit(proj_id, file_path, content)
+                    )
+                    logger.info("DialogService: Connected projectFilesSaved to EventBus.")
+
+                if hasattr(self._code_viewer_window, 'focusSetOnFiles'):
+                    self._code_viewer_window.focusSetOnFiles.connect(
+                        lambda proj_id, file_paths:
+                        self._event_bus.focusSetOnFiles.emit(proj_id, file_paths)
+                    )
+                    logger.info("DialogService: Connected focusSetOnFiles to EventBus.")
 
             if self._code_viewer_window:
                 self._code_viewer_window.show()
                 self._code_viewer_window.activateWindow()
                 self._code_viewer_window.raise_()
-                logger.debug("DialogService: Code viewer window shown and activated.")
+                logger.debug("DialogService: Enhanced Code viewer window shown and activated.")
 
             return self._code_viewer_window
 
         except Exception as e_cv:
-            logger.error(f"Error showing CodeViewerWindow: {e_cv}", exc_info=True)
-            QMessageBox.critical(self.parent_window, "Dialog Error", f"Could not open Code Viewer:\n{e_cv}")
+            logger.error(f"Error showing Enhanced CodeViewerWindow: {e_cv}", exc_info=True)
+            QMessageBox.critical(self.parent_window, "Dialog Error", f"Could not open Enhanced Code Viewer:\n{e_cv}")
             return None
 
     def get_or_create_code_viewer(self) -> Optional[CodeViewerWindow]:
@@ -137,29 +157,38 @@ class DialogService(QObject):
 
     def display_file_in_code_viewer(self, filename: str, content: str, project_id: Optional[str] = None,
                                     focus_prefix: Optional[str] = None) -> bool:
-        """Display a file in the code viewer - handles creation and display"""
+        """Enhanced version that works with both new multi-project and legacy modes"""
         try:
             code_viewer = self.get_or_create_code_viewer()
             if not code_viewer:
                 logger.error("DialogService: Could not get/create code viewer for file display")
                 return False
 
-            # Update or add the file
-            code_viewer.update_or_add_file(
-                filename=filename,
-                content=content,
-                is_ai_modification=True,
-                original_content=None,
-                project_id_for_apply=project_id,
-                focus_prefix_for_apply=focus_prefix
-            )
+            # Use enhanced method if available, fall back to legacy
+            if hasattr(code_viewer, 'add_generated_file'):
+                # Enhanced multi-project mode
+                code_viewer.add_generated_file(
+                    filename=filename,
+                    content=content,
+                    project_id=project_id
+                )
+            else:
+                # Legacy single-file mode
+                code_viewer.update_or_add_file(
+                    filename=filename,
+                    content=content,
+                    is_ai_modification=True,
+                    original_content=None,
+                    project_id_for_apply=project_id,
+                    focus_prefix_for_apply=focus_prefix
+                )
 
             # Ensure the code viewer is visible and focused
             code_viewer.show()
             code_viewer.activateWindow()
             code_viewer.raise_()
 
-            logger.info(f"DialogService: Successfully displayed file '{filename}' in code viewer")
+            logger.info(f"DialogService: Successfully displayed file '{filename}' in enhanced code viewer")
             return True
 
         except Exception as e:
@@ -218,7 +247,7 @@ class DialogService(QObject):
             QMessageBox.critical(self.parent_window, "Dialog Error",
                                  f"Could not open Project RAG File Dialog:\n{e_pr_dlg}")
 
-    # NEW: Update dialog methods
+    # Update dialog methods
     @Slot(object)
     def show_update_dialog(self, update_info: UpdateInfo):
         """Show the update dialog when an update is available"""
@@ -280,6 +309,25 @@ class DialogService(QObject):
             "Please check your internet connection and try again."
         )
 
+    # NEW: Event handlers for enhanced CodeViewer
+    @Slot(str, str, str)
+    def _handle_code_viewer_project_loaded(self, project_name: str, project_path: str, project_id: str):
+        """Handle project loading in CodeViewer"""
+        logger.info(f"CodeViewer project loaded: {project_name} at {project_path}")
+        # Could add additional logic here like updating UI status
+
+    @Slot(str, str, str)
+    def _handle_project_file_saved_in_viewer(self, project_id: str, file_path: str, content: str):
+        """Handle file saves from CodeViewer"""
+        logger.info(f"File saved in CodeViewer: {project_id} - {os.path.basename(file_path)}")
+        # The RagSyncService handles the actual sync, this is just for UI feedback
+
+    @Slot(str, list)
+    def _handle_focus_set_from_viewer(self, project_id: str, file_paths: list):
+        """Handle focus requests from CodeViewer"""
+        logger.info(f"Focus set from CodeViewer: {len(file_paths)} files in {project_id}")
+        # Could add UI feedback or additional processing
+
     def close_non_modal_dialogs(self):
         logger.info("DialogService attempting to close non-modal dialogs.")
         if self._llm_terminal_window and self._llm_terminal_window.isVisible():
@@ -296,7 +344,7 @@ class DialogService(QObject):
             except Exception as e_close_cv:
                 logger.error(f"Error closing CodeViewerWindow: {e_close_cv}")
 
-        # NEW: Close update dialog if open
+        # Close update dialog if open
         if self._update_dialog and self._update_dialog.isVisible():
             try:
                 self._update_dialog.close()
